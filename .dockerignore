@@ -1,0 +1,23 @@
+# Keep the Railway build context small — only apps/worker is deployed.
+.git
+apps/web
+docs
+scratch
+scripts
+supabase
+README.md
+
+# Secrets and local state — never bake into the image
+.env
+.env.*
+apps/worker/upstox_token.json
+apps/worker/subscribed_symbols.json
+
+# Python / editor cruft
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+.venv/
+venv/
+.vscode/
+.idea/
