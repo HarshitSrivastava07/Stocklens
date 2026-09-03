@@ -12,6 +12,7 @@ Reads the same Redis + Postgres that apps/worker writes; it never writes.
 """
 import contextlib
 import os
+import re
 from pathlib import Path
 
 import asyncpg
@@ -20,8 +21,12 @@ from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, StreamingResponse
 
 def _clean(raw: str) -> str:
-    """Trim whitespace / stray quotes that sneak in via env editors."""
-    return (raw or "").strip().strip('"').strip("'").strip()
+    """Trim whitespace / stray quotes / a pasted `NAME=` prefix from env values."""
+    v = (raw or "").strip().strip('"').strip("'").strip()
+    m = re.match(r"^[A-Za-z_][A-Za-z0-9_]{2,40}=(?=[a-z]+://)", v)
+    if m:
+        v = v[m.end():].strip().strip('"').strip("'").strip()
+    return v
 
 
 DATABASE_URL = (
