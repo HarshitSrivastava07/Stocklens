@@ -139,21 +139,27 @@ class YahooPriceFetcher:
             if not ltp or ltp <= 0:
                 return None
 
-            prev_close = meta_info.get("previousClose", ltp)
+            # Yahoo's v8 chart `meta` often returns previousClose/regularMarketOpen
+            # as null — chartPreviousClose is reliable; fall back to the most
+            # recent day in the indicator arrays, then to ltp.
+            indicators = chart_data.get("indicators", {}).get("quote", [{}])[0]
+
+            def _last(key):
+                vals = [v for v in indicators.get(key, []) if v is not None]
+                return vals[-1] if vals else None
+
+            prev_close = (
+                meta_info.get("previousClose")
+                or meta_info.get("chartPreviousClose")
+                or ltp
+            )
             change_abs = ltp - prev_close
             change_pct = (change_abs / prev_close) * 100 if prev_close else 0.0
 
-            # Fallback high/low/open/volume from chart indicators if available
-            indicators = chart_data.get("indicators", {}).get("quote", [{}])[0]
-            highs = [h for h in indicators.get("high", []) if h is not None]
-            lows = [l for l in indicators.get("low", []) if l is not None]
-            opens = [o for o in indicators.get("open", []) if o is not None]
-            volumes = [v for v in indicators.get("volume", []) if v is not None]
-
-            high_price = max(highs) if highs else ltp
-            low_price = min(lows) if lows else ltp
-            open_price = opens[0] if opens else ltp
-            vol = sum(volumes) if volumes else 0
+            open_price = meta_info.get("regularMarketOpen") or _last("open") or ltp
+            high_price = meta_info.get("regularMarketDayHigh") or _last("high") or ltp
+            low_price = meta_info.get("regularMarketDayLow") or _last("low") or ltp
+            vol = meta_info.get("regularMarketVolume") or _last("volume") or 0
 
             return {
                 "symbol":      meta["nse_symbol"],

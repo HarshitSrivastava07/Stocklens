@@ -1,0 +1,276 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>StockLens — Live Quotes</title>
+<style>
+  :root {
+    --bg: #0d1117; --panel: #161b22; --panel-2: #1c2129; --border: #2a313c;
+    --text: #e6edf3; --muted: #8b949e; --up: #3fb950; --down: #f85149;
+    --accent: #58a6ff;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+  a { color: var(--accent); }
+  header {
+    display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+    padding: 14px 20px; border-bottom: 1px solid var(--border); background: var(--panel);
+    position: sticky; top: 0; z-index: 5;
+  }
+  header h1 { font-size: 17px; margin: 0; letter-spacing: .3px; }
+  header h1 span { color: var(--accent); }
+  .live {
+    display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted);
+  }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+  .dot.on { background: var(--up); box-shadow: 0 0 0 0 rgba(63,185,80,.6); animation: pulse 2s infinite; }
+  .dot.err { background: var(--down); }
+  @keyframes pulse {
+    0% { box-shadow: 0 0 0 0 rgba(63,185,80,.5); }
+    70% { box-shadow: 0 0 0 7px rgba(63,185,80,0); }
+    100% { box-shadow: 0 0 0 0 rgba(63,185,80,0); }
+  }
+  .spacer { flex: 1; }
+  .updated { font-size: 12px; color: var(--muted); }
+
+  .stats { display: flex; gap: 10px; flex-wrap: wrap; padding: 16px 20px 4px; }
+  .card {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+    padding: 10px 14px; min-width: 120px;
+  }
+  .card .k { font-size: 11px; text-transform: uppercase; letter-spacing: .6px; color: var(--muted); }
+  .card .v { font-size: 20px; font-weight: 650; margin-top: 2px; font-variant-numeric: tabular-nums; }
+  .card .v.up { color: var(--up); } .card .v.down { color: var(--down); }
+
+  .controls { display: flex; gap: 10px; flex-wrap: wrap; padding: 12px 20px; align-items: center; }
+  input, select {
+    background: var(--panel-2); color: var(--text); border: 1px solid var(--border);
+    border-radius: 8px; padding: 8px 10px; font-size: 13px; outline: none;
+  }
+  input:focus, select:focus { border-color: var(--accent); }
+  input[type=search] { min-width: 220px; flex: 1; max-width: 360px; }
+
+  .wrap { overflow-x: auto; padding: 0 20px 40px; }
+  table { width: 100%; border-collapse: collapse; min-width: 820px; }
+  th, td { text-align: right; padding: 9px 12px; white-space: nowrap; }
+  th:first-child, td:first-child, th:nth-child(2), td:nth-child(2) { text-align: left; }
+  thead th {
+    position: sticky; top: 57px; background: var(--bg); color: var(--muted);
+    font-size: 11px; text-transform: uppercase; letter-spacing: .5px; border-bottom: 1px solid var(--border);
+    cursor: pointer; user-select: none;
+  }
+  thead th.sorted::after { content: " ▾"; color: var(--accent); }
+  thead th.sorted.asc::after { content: " ▴"; }
+  tbody tr { border-bottom: 1px solid var(--border); }
+  tbody tr:hover { background: var(--panel); }
+  td { font-variant-numeric: tabular-nums; }
+  .sym { font-weight: 650; }
+  .name { color: var(--muted); max-width: 260px; overflow: hidden; text-overflow: ellipsis; }
+  .badge {
+    font-size: 10px; padding: 1px 6px; border: 1px solid var(--border); border-radius: 6px;
+    color: var(--muted); margin-left: 6px;
+  }
+  .up { color: var(--up); } .down { color: var(--down); }
+  @keyframes flash-up { from { background: rgba(63,185,80,.22); } to { background: transparent; } }
+  @keyframes flash-down { from { background: rgba(248,81,73,.22); } to { background: transparent; } }
+  tr.fu td { animation: flash-up 1s ease-out; }
+  tr.fd td { animation: flash-down 1s ease-out; }
+  .empty { padding: 40px; text-align: center; color: var(--muted); }
+  footer { padding: 16px 20px 40px; color: var(--muted); font-size: 12px; border-top: 1px solid var(--border); }
+</style>
+</head>
+<body>
+<header>
+  <h1>Stock<span>Lens</span></h1>
+  <span class="live"><span class="dot" id="dot"></span><span id="livetext">connecting…</span></span>
+  <span class="spacer"></span>
+  <span class="updated" id="updated"></span>
+</header>
+
+<div class="stats" id="stats"></div>
+
+<div class="controls">
+  <input type="search" id="q" placeholder="Search symbol or company…" autocomplete="off">
+  <select id="exchange">
+    <option value="all">All exchanges</option>
+  </select>
+  <select id="limit">
+    <option value="100">Top 100</option>
+    <option value="250">Top 250</option>
+    <option value="500" selected>Top 500</option>
+    <option value="2000">All</option>
+  </select>
+</div>
+
+<div class="wrap">
+  <table>
+    <thead>
+      <tr>
+        <th data-sort="nse_symbol">Symbol</th>
+        <th data-sort="company_name">Company</th>
+        <th data-sort="ltp">Last</th>
+        <th data-sort="change_abs">Chg</th>
+        <th data-sort="change_pct">Chg %</th>
+        <th data-sort="volume">Volume</th>
+        <th data-sort="week_range">52W Range</th>
+        <th data-sort="last_updated">Updated</th>
+      </tr>
+    </thead>
+    <tbody id="rows"></tbody>
+  </table>
+  <div class="empty" id="empty" hidden>No quotes yet — the worker writes them every 60s once stocks are seeded.</div>
+</div>
+
+<footer>
+  Data: Yahoo Finance (global, ~15&nbsp;min delayed) and Upstox (NSE realtime, when configured).
+  Not investment advice. &nbsp;·&nbsp; <a href="/api/quotes">/api/quotes</a> · <a href="/api/stats">/api/stats</a>
+</footer>
+
+<script>
+const $ = s => document.querySelector(s);
+const state = { quotes: [], sort: "change_pct", order: "desc", exchange: "all", q: "", limit: 500 };
+const fmt = (n, d = 2) => n == null ? "—" : Number(n).toLocaleString(undefined, { minimumFractionDigits: d, maximumFractionDigits: d });
+const fmtVol = n => n == null ? "—" : n >= 1e9 ? (n/1e9).toFixed(2)+"B" : n >= 1e6 ? (n/1e6).toFixed(2)+"M" : n >= 1e3 ? (n/1e3).toFixed(1)+"K" : String(n);
+const ago = iso => {
+  if (!iso) return "—";
+  const s = Math.floor((Date.now() - new Date(iso)) / 1000);
+  if (s < 60) return s + "s ago";
+  if (s < 3600) return Math.floor(s/60) + "m ago";
+  if (s < 86400) return Math.floor(s/3600) + "h ago";
+  return Math.floor(s/86400) + "d ago";
+};
+
+async function loadStats() {
+  try {
+    const s = await (await fetch("/api/stats")).json();
+    $("#stats").innerHTML = `
+      ${card("Tracked", s.stocks_tracked)}
+      ${card("Quotes", s.quotes)}
+      ${card("Gainers", s.gainers, "up")}
+      ${card("Losers", s.losers, "down")}
+      ${card("Universe", s.stocks_total)}`;
+    $("#updated").textContent = s.last_updated ? "DB updated " + ago(s.last_updated) : "";
+  } catch (e) { /* ignore */ }
+}
+const card = (k, v, cls = "") => `<div class="card"><div class="k">${k}</div><div class="v ${cls}">${v ?? "—"}</div></div>`;
+
+async function loadQuotes() {
+  const p = new URLSearchParams({ sort: state.sort, order: state.order, limit: state.limit });
+  if (state.exchange !== "all") p.set("exchange", state.exchange);
+  if (state.q) p.set("search", state.q);
+  try {
+    state.quotes = await (await fetch("/api/quotes?" + p)).json();
+    render();
+    fillExchanges();
+  } catch (e) {
+    $("#empty").hidden = false;
+    $("#empty").textContent = "Could not load quotes: " + e;
+  }
+}
+
+const seenExch = new Set();
+function fillExchanges() {
+  for (const r of state.quotes) {
+    if (r.exchange && !seenExch.has(r.exchange)) {
+      seenExch.add(r.exchange);
+      const o = document.createElement("option");
+      o.value = o.textContent = r.exchange;
+      $("#exchange").appendChild(o);
+    }
+  }
+}
+
+function render() {
+  const tb = $("#rows");
+  tb.innerHTML = "";
+  if (!state.quotes.length) { $("#empty").hidden = false; return; }
+  $("#empty").hidden = true;
+  for (const r of state.quotes) {
+    const cls = r.change_pct > 0 ? "up" : r.change_pct < 0 ? "down" : "";
+    const sign = r.change_abs > 0 ? "+" : "";
+    const tr = document.createElement("tr");
+    tr.dataset.sym = r.nse_symbol;
+    tr.innerHTML = `
+      <td class="sym">${r.nse_symbol}</td>
+      <td class="name" title="${r.company_name || ""}">${r.company_name || ""}
+        <span class="badge">${r.exchange || ""}</span></td>
+      <td data-f="ltp">${fmt(r.ltp)} <span class="badge">${r.currency || ""}</span></td>
+      <td class="${cls}">${sign}${fmt(r.change_abs)}</td>
+      <td class="${cls}" data-f="pct">${sign}${fmt(r.change_pct)}%</td>
+      <td>${fmtVol(r.volume)}</td>
+      <td>${fmt(r.week_52_low)} – ${fmt(r.week_52_high)}</td>
+      <td>${ago(r.last_updated)}</td>`;
+    tb.appendChild(tr);
+  }
+  document.querySelectorAll("thead th").forEach(th => {
+    th.classList.toggle("sorted", th.dataset.sort === state.sort);
+    th.classList.toggle("asc", th.dataset.sort === state.sort && state.order === "asc");
+  });
+}
+
+// live merge from SSE
+function applyBatch(batch) {
+  const byId = new Map(state.quotes.map(q => [q.nse_symbol, q]));
+  let touched = false;
+  for (const u of (batch.updates || [])) {
+    const q = byId.get(u.symbol);
+    if (!q) continue;
+    const oldLtp = q.ltp;
+    Object.assign(q, {
+      ltp: u.ltp, change_abs: u.change_abs, change_pct: u.change_pct,
+      open: u.open, high: u.high, low: u.low, volume: u.volume,
+      last_updated: u.ts || new Date().toISOString(),
+    });
+    const row = document.querySelector(`tr[data-sym="${CSS.escape(u.symbol)}"]`);
+    if (row) {
+      row.classList.remove("fu", "fd");
+      void row.offsetWidth;
+      row.classList.add(u.ltp >= oldLtp ? "fu" : "fd");
+      row.querySelector('[data-f="ltp"]').firstChild.textContent = fmt(u.ltp) + " ";
+      const pct = row.querySelector('[data-f="pct"]');
+      const cls = u.change_pct > 0 ? "up" : u.change_pct < 0 ? "down" : "";
+      pct.className = cls + " ";
+      pct.dataset.f = "pct";
+      pct.textContent = (u.change_abs > 0 ? "+" : "") + fmt(u.change_pct) + "%";
+    }
+    touched = true;
+  }
+  if (touched) $("#updated").textContent = "live update " + new Date().toLocaleTimeString();
+}
+
+function connectSSE() {
+  const es = new EventSource("/api/stream");
+  es.onopen = () => { $("#dot").className = "dot on"; $("#livetext").textContent = "live"; };
+  es.onerror = () => { $("#dot").className = "dot err"; $("#livetext").textContent = "reconnecting…"; };
+  es.onmessage = ev => {
+    try { const d = JSON.parse(ev.data); if (d.type === "batch") applyBatch(d); } catch {}
+  };
+}
+
+// events
+$("#q").addEventListener("input", debounce(() => { state.q = $("#q").value.trim(); loadQuotes(); }, 300));
+$("#exchange").addEventListener("change", () => { state.exchange = $("#exchange").value; loadQuotes(); });
+$("#limit").addEventListener("change", () => { state.limit = +$("#limit").value; loadQuotes(); });
+document.querySelectorAll("thead th").forEach(th => th.addEventListener("click", () => {
+  const key = th.dataset.sort;
+  if (!["nse_symbol", "ltp", "change_pct", "volume", "last_updated", "change_abs"].includes(key)) return;
+  if (state.sort === key) state.order = state.order === "asc" ? "desc" : "asc";
+  else { state.sort = key; state.order = key === "nse_symbol" ? "asc" : "desc"; }
+  loadQuotes();
+}));
+function debounce(fn, ms) { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; }
+
+// boot
+loadStats(); loadQuotes(); connectSSE();
+setInterval(loadStats, 30000);
+setInterval(loadQuotes, 45000);
+setInterval(() => document.querySelectorAll("#rows td:last-child").forEach((td, i) => {
+  const r = state.quotes[i]; if (r) td.textContent = ago(r.last_updated);
+}), 15000);
+</script>
+</body>
+</html>
