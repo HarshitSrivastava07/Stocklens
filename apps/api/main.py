@@ -10,6 +10,7 @@ Reads the same Redis + Postgres that apps/worker writes; it never writes.
   GET /api/quotes/{sym}  -> one symbol
   GET /api/stream        -> Server-Sent Events, forwarded from Redis `ticks:dashboard`
 """
+import asyncio
 import contextlib
 import os
 import re
@@ -72,13 +73,36 @@ _NUMERIC = (
 )
 
 
+async def _connect_db_with_retry(tries: int = 15, delay: float = 3.0):
+    """Railway's private network (*.railway.internal) can take a few seconds to
+    attach after the container starts — retry instead of crash-looping."""
+    last = None
+    for i in range(1, tries + 1):
+        try:
+            return await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=5)
+        except (OSError, asyncpg.PostgresError) as e:
+            last = e
+            print(f"[startup] DB connect {i}/{tries} failed: {e!r} — retry in {delay}s", flush=True)
+            await asyncio.sleep(delay)
+    raise RuntimeError(
+        f"Could not reach Postgres after {tries} tries ({last!r}). "
+        f"If this is a DNS error on a *.railway.internal host, use the Postgres "
+        f"service's public URL for DATABASE_URL instead."
+    )
+
+
 @contextlib.asynccontextmanager
 async def lifespan(app: FastAPI):
     _check_url("DATABASE_URL", DATABASE_URL, ("postgresql://", "postgres://"))
-    app.state.db = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=5)
-    app.state.redis = (
-        aioredis.from_url(REDIS_URL, decode_responses=True) if REDIS_URL else None
-    )
+    app.state.db = await _connect_db_with_retry()
+    app.state.redis = None
+    if REDIS_URL:
+        try:
+            r = aioredis.from_url(REDIS_URL, decode_responses=True)
+            await r.ping()
+            app.state.redis = r
+        except Exception as e:  # live SSE is optional; the dashboard also polls
+            print(f"[startup] Redis unavailable ({e!r}) — /api/stream disabled", flush=True)
     try:
         yield
     finally:
