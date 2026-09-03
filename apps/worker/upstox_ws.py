@@ -38,7 +38,23 @@ logging.basicConfig(
 log = logging.getLogger("upstox_worker")
 
 # ── Config ────────────────────────────────────────────────────
-REDIS_URL = os.environ["REDIS_URL"]
+def _require_env(name: str) -> str:
+    """Return env var `name`, or exit with a diagnostic listing what we got."""
+    val = os.environ.get(name)
+    if val:
+        return val
+    keys = sorted(k for k in os.environ if not k.startswith("_"))
+    log.error(
+        "Missing required environment variable %s.\n"
+        "  Container received these env vars: %s\n"
+        "  Fix: set %s on the service that deploys this repo "
+        "(NOT the Redis/Postgres service), then redeploy.",
+        name, ", ".join(keys) or "(none)", name,
+    )
+    sys.exit(1)
+
+
+REDIS_URL = _require_env("REDIS_URL")
 UPSTOX_ACCESS_TOKEN = os.environ.get("UPSTOX_ACCESS_TOKEN", "")
 PRICE_STALE_TTL = 30           # seconds — expire Redis key if no update
 RECONNECT_BASE_DELAY = 1       # seconds
