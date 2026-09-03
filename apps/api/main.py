@@ -19,13 +19,34 @@ import redis.asyncio as aioredis
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, StreamingResponse
 
+def _clean(raw: str) -> str:
+    """Trim whitespace / stray quotes that sneak in via env editors."""
+    return (raw or "").strip().strip('"').strip("'").strip()
+
+
 DATABASE_URL = (
-    os.environ.get("DATABASE_URL", "")
+    _clean(os.environ.get("DATABASE_URL", ""))
     .replace("postgresql+asyncpg://", "postgresql://")
     .replace("+asyncpg", "")
 )
-REDIS_URL = os.environ.get("REDIS_URL", "")
+REDIS_URL = _clean(os.environ.get("REDIS_URL", ""))
 STATIC_DIR = Path(__file__).parent / "static"
+
+
+def _check_url(name: str, val: str, schemes: tuple[str, ...]) -> None:
+    if not val:
+        raise RuntimeError(f"{name} is empty on this service — set it in the Variables tab.")
+    if val.startswith("${{") or "${{" in val:
+        raise RuntimeError(
+            f"{name} is the unresolved Railway template {val!r}. The reference did "
+            f"not resolve — set {name} to the LITERAL connection string from the "
+            f"Postgres/Redis service instead (no ${{{{ }}}})."
+        )
+    if not val.startswith(schemes):
+        raise RuntimeError(
+            f"{name} is not a valid URL. Got {val[:18]!r}… (length {len(val)}); "
+            f"expected it to start with one of {schemes}."
+        )
 
 QUOTES_SQL = """
     SELECT q.nse_symbol,
@@ -48,8 +69,7 @@ _NUMERIC = (
 
 @contextlib.asynccontextmanager
 async def lifespan(app: FastAPI):
-    if not DATABASE_URL:
-        raise RuntimeError("DATABASE_URL is not set on this service")
+    _check_url("DATABASE_URL", DATABASE_URL, ("postgresql://", "postgres://"))
     app.state.db = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=5)
     app.state.redis = (
         aioredis.from_url(REDIS_URL, decode_responses=True) if REDIS_URL else None
