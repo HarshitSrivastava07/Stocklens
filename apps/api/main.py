@@ -1,224 +1,204 @@
 """
-StockLens API + dashboard.
-
-Reads the same Redis + Postgres that apps/worker writes; it never writes.
-
-  GET /                  -> static/index.html (live quotes dashboard)
-  GET /health            -> healthcheck for Railway
-  GET /api/stats         -> universe + freshness counters
-  GET /api/quotes        -> latest quote per symbol (realtime_quotes JOIN stocks)
-  GET /api/quotes/{sym}  -> one symbol
-  GET /api/stream        -> Server-Sent Events, forwarded from Redis `ticks:dashboard`
+StockLens — FastAPI Application Entry Point
+Personal NSE Stock Intelligence Platform
 """
-import asyncio
-import contextlib
-import os
-import re
-from pathlib import Path
+import logging
+from contextlib import asynccontextmanager
 
-import asyncpg
-import redis.asyncio as aioredis
-from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.responses import FileResponse, StreamingResponse
+import structlog
+from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
-def _clean(raw: str) -> str:
-    """Trim whitespace / stray quotes / a pasted `NAME=` prefix from env values."""
-    v = (raw or "").strip().strip('"').strip("'").strip()
-    m = re.match(r"^[A-Za-z_][A-Za-z0-9_]{2,40}=(?=[a-z]+://)", v)
-    if m:
-        v = v[m.end():].strip().strip('"').strip("'").strip()
-    return v
+from dependencies.db import engine, Base
+from dependencies.redis import get_redis_client
+from config import settings
 
-
-DATABASE_URL = (
-    _clean(os.environ.get("DATABASE_URL", ""))
-    .replace("postgresql+asyncpg://", "postgresql://")
-    .replace("+asyncpg", "")
+# Routers
+from routers import (
+    market,
+    stocks,
+    valuation,
+    ml as ml_router,
+    ai as ai_router,
+    screener,
+    watchlist,
+    alerts,
+    portfolio,
+    sectors,
+    backtest,
+    admin,
+    ws,
+    fo,
+    auth,
 )
-REDIS_URL = _clean(os.environ.get("REDIS_URL", ""))
-STATIC_DIR = Path(__file__).parent / "static"
+from services.scheduler_service import start_scheduler, stop_scheduler
 
-
-def _check_url(name: str, val: str, schemes: tuple[str, ...]) -> None:
-    if not val:
-        raise RuntimeError(f"{name} is empty on this service — set it in the Variables tab.")
-    if val.startswith("${{") or "${{" in val:
-        raise RuntimeError(
-            f"{name} is the unresolved Railway template {val!r}. The reference did "
-            f"not resolve — set {name} to the LITERAL connection string from the "
-            f"Postgres/Redis service instead (no ${{{{ }}}})."
-        )
-    if not val.startswith(schemes):
-        raise RuntimeError(
-            f"{name} is not a valid URL. Got {val[:18]!r}… (length {len(val)}); "
-            f"expected it to start with one of {schemes}."
-        )
-
-QUOTES_SQL = """
-    SELECT q.nse_symbol,
-           s.company_name,
-           s.exchange,
-           s.currency,
-           q.ltp, q.open, q.high, q.low, q.close,
-           q.change_abs, q.change_pct, q.volume,
-           q.week_52_high, q.week_52_low, q.market_cap,
-           q.data_source, q.is_stale, q.last_updated
-      FROM realtime_quotes q
-      JOIN stocks s ON s.nse_symbol = q.nse_symbol
-"""
-
-_NUMERIC = (
-    "ltp", "open", "high", "low", "close", "change_abs", "change_pct",
-    "week_52_high", "week_52_low", "market_cap",
+# ─────────────────────────────────────────────────────────────
+# Structured logging
+# ─────────────────────────────────────────────────────────────
+structlog.configure(
+    processors=[
+        structlog.processors.TimeStamper(fmt="iso"),
+        structlog.stdlib.add_log_level,
+        structlog.processors.StackInfoRenderer(),
+        structlog.dev.ConsoleRenderer() if settings.APP_ENV == "development"
+        else structlog.processors.JSONRenderer(),
+    ],
+    wrapper_class=structlog.BoundLogger,
+    context_class=dict,
+    logger_factory=structlog.PrintLoggerFactory(),
 )
 
-
-async def _connect_db_with_retry(tries: int = 15, delay: float = 3.0):
-    """Railway's private network (*.railway.internal) can take a few seconds to
-    attach after the container starts — retry instead of crash-looping."""
-    last = None
-    for i in range(1, tries + 1):
-        try:
-            return await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=5)
-        except (OSError, asyncpg.PostgresError) as e:
-            last = e
-            print(f"[startup] DB connect {i}/{tries} failed: {e!r} — retry in {delay}s", flush=True)
-            await asyncio.sleep(delay)
-    raise RuntimeError(
-        f"Could not reach Postgres after {tries} tries ({last!r}). "
-        f"If this is a DNS error on a *.railway.internal host, use the Postgres "
-        f"service's public URL for DATABASE_URL instead."
-    )
+log = structlog.get_logger()
 
 
-@contextlib.asynccontextmanager
+# ─────────────────────────────────────────────────────────────
+# App Lifespan (startup / shutdown)
+# ─────────────────────────────────────────────────────────────
+@asynccontextmanager
 async def lifespan(app: FastAPI):
-    _check_url("DATABASE_URL", DATABASE_URL, ("postgresql://", "postgres://"))
-    app.state.db = await _connect_db_with_retry()
-    app.state.redis = None
-    if REDIS_URL:
-        try:
-            r = aioredis.from_url(REDIS_URL, decode_responses=True)
-            await r.ping()
-            app.state.redis = r
-        except Exception as e:  # live SSE is optional; the dashboard also polls
-            print(f"[startup] Redis unavailable ({e!r}) — /api/stream disabled", flush=True)
+    """Startup and shutdown hooks."""
+    log.info("StockLens API starting up", env=settings.APP_ENV)
+
+    # Create DB tables if not exist (migrations should handle this,
+    # but this is a safety net for dev mode)
+    from sqlalchemy import text
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+        # Apply global stock universe columns migration
+        await conn.execute(text("ALTER TABLE stocks DROP CONSTRAINT IF EXISTS stocks_isin_key;"))
+        await conn.execute(text("ALTER TABLE stocks ADD COLUMN IF NOT EXISTS exchange VARCHAR(20) NOT NULL DEFAULT 'NSE';"))
+        await conn.execute(text("ALTER TABLE stocks ADD COLUMN IF NOT EXISTS currency VARCHAR(5) NOT NULL DEFAULT 'INR';"))
+        await conn.execute(text("ALTER TABLE stocks ADD COLUMN IF NOT EXISTS yahoo_ticker VARCHAR(30);"))
+        await conn.execute(text("ALTER TABLE stocks ADD COLUMN IF NOT EXISTS country VARCHAR(50) NOT NULL DEFAULT 'India';"))
+        await conn.execute(text("CREATE INDEX IF NOT EXISTS idx_stocks_exchange ON stocks(exchange);"))
+        await conn.execute(text("CREATE INDEX IF NOT EXISTS idx_stocks_country ON stocks(country);"))
+        await conn.execute(text("CREATE INDEX IF NOT EXISTS idx_stocks_yahoo ON stocks(yahoo_ticker);"))
+
+    # Verify Redis connection
     try:
-        yield
-    finally:
-        await app.state.db.close()
-        if app.state.redis is not None:
-            await app.state.redis.aclose()
+        redis = await get_redis_client()
+        await redis.ping()
+        log.info("Redis connection OK")
+    except Exception as e:
+        log.error("Redis connection failed", error=str(e))
+
+    # Start background scheduler
+    if settings.SCHEDULER_ENABLED:
+        start_scheduler()
+        log.info("Background scheduler started")
+
+    yield
+
+    # Shutdown
+    log.info("StockLens API shutting down")
+    if settings.SCHEDULER_ENABLED:
+        stop_scheduler()
+    await engine.dispose()
 
 
-app = FastAPI(title="StockLens", lifespan=lifespan)
+# ─────────────────────────────────────────────────────────────
+# FastAPI App
+# ─────────────────────────────────────────────────────────────
+app = FastAPI(
+    title="StockLens API",
+    description="NSE Stock Intelligence Platform — Personal Research Tool",
+    version="1.0.0",
+    docs_url="/docs" if settings.APP_ENV == "development" else None,
+    redoc_url="/redoc" if settings.APP_ENV == "development" else None,
+    lifespan=lifespan,
+)
 
 
-def _row_to_quote(r: asyncpg.Record) -> dict:
-    d = dict(r)
-    lu = d.get("last_updated")
-    d["last_updated"] = lu.isoformat() if lu else None
-    for k in _NUMERIC:
-        if d.get(k) is not None:
-            d[k] = float(d[k])
-    return d
+# ─────────────────────────────────────────────────────────────
+# CORS — local only (no wildcard in production)
+# ─────────────────────────────────────────────────────────────
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.CORS_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization", "X-Request-ID"],
+)
 
 
-@app.get("/health")
-async def health():
-    try:
-        await app.state.db.fetchval("SELECT 1")
-    except Exception as e:  # pragma: no cover
-        raise HTTPException(503, f"db unavailable: {e}")
-    return {"status": "ok"}
+# ─────────────────────────────────────────────────────────────
+# Security Headers Middleware
+# ─────────────────────────────────────────────────────────────
+@app.middleware("http")
+async def add_security_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["X-Request-ID"] = request.headers.get("X-Request-ID", "")
+    # Remove server fingerprint
+    if "server" in response.headers:
+        del response.headers["server"]
+    return response
 
 
-@app.get("/api/stats")
-async def stats():
-    async with app.state.db.acquire() as c:
-        return {
-            "stocks_total": await c.fetchval(
-                "SELECT COUNT(*) FROM stocks WHERE is_active"
-            ),
-            "stocks_tracked": await c.fetchval(
-                "SELECT COUNT(*) FROM stocks WHERE yahoo_ticker IS NOT NULL AND is_active"
-            ),
-            "quotes": await c.fetchval("SELECT COUNT(*) FROM realtime_quotes"),
-            "gainers": await c.fetchval(
-                "SELECT COUNT(*) FROM realtime_quotes WHERE change_pct > 0"
-            ),
-            "losers": await c.fetchval(
-                "SELECT COUNT(*) FROM realtime_quotes WHERE change_pct < 0"
-            ),
-            "last_updated": (
-                lambda t: t.isoformat() if t else None
-            )(await c.fetchval("SELECT MAX(last_updated) FROM realtime_quotes")),
-        }
-
-
-@app.get("/api/quotes")
-async def quotes(
-    exchange: str | None = None,
-    search: str | None = None,
-    sort: str = Query("change_pct"),
-    order: str = Query("desc"),
-    limit: int = Query(500, ge=1, le=2000),
-):
-    if sort not in {"change_pct", "ltp", "volume", "market_cap", "last_updated", "nse_symbol"}:
-        sort = "change_pct"
-    order_sql = "ASC" if order.lower() == "asc" else "DESC"
-
-    sql, args, conds = QUOTES_SQL, [], []
-    if exchange and exchange.lower() != "all":
-        args.append(exchange.upper())
-        conds.append(f"s.exchange = ${len(args)}")
-    if search:
-        args.append(f"%{search}%")
-        conds.append(f"(s.company_name ILIKE ${len(args)} OR q.nse_symbol ILIKE ${len(args)})")
-    if conds:
-        sql += " WHERE " + " AND ".join(conds)
-    args.append(limit)
-    sql += f" ORDER BY q.{sort} {order_sql} NULLS LAST LIMIT ${len(args)}"
-
-    rows = await app.state.db.fetch(sql, *args)
-    return [_row_to_quote(r) for r in rows]
-
-
-@app.get("/api/quotes/{symbol}")
-async def quote(symbol: str):
-    r = await app.state.db.fetchrow(QUOTES_SQL + " WHERE q.nse_symbol = $1", symbol.upper())
-    if not r:
-        raise HTTPException(404, "no quote for that symbol yet")
-    return _row_to_quote(r)
-
-
-@app.get("/api/stream")
-async def stream(request: Request):
-    if app.state.redis is None:
-        raise HTTPException(503, "REDIS_URL not configured on this service")
-
-    async def gen():
-        pubsub = app.state.redis.pubsub()
-        await pubsub.subscribe("ticks:dashboard")
-        try:
-            while not await request.is_disconnected():
-                msg = await pubsub.get_message(
-                    ignore_subscribe_messages=True, timeout=15
-                )
-                if msg and msg.get("type") == "message":
-                    yield f"data: {msg['data']}\n\n"
-                else:
-                    yield ": keepalive\n\n"
-        finally:
-            await pubsub.aclose()
-
-    return StreamingResponse(
-        gen(),
-        media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+# ─────────────────────────────────────────────────────────────
+# Global Error Handler — never expose stack traces
+# ─────────────────────────────────────────────────────────────
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    log.error(
+        "Unhandled exception",
+        path=request.url.path,
+        method=request.method,
+        error=str(exc),
+        error_type=type(exc).__name__,
+    )
+    return JSONResponse(
+        status_code=500,
+        content={
+            "error": "Internal server error",
+            "message": "An unexpected error occurred. Please try again.",
+        },
     )
 
 
-@app.get("/")
-async def index():
-    return FileResponse(STATIC_DIR / "index.html")
+# ─────────────────────────────────────────────────────────────
+# Routers
+# ─────────────────────────────────────────────────────────────
+API_PREFIX = "/api/v1"
+
+app.include_router(market.router,    prefix=f"{API_PREFIX}/market",    tags=["Market Data"])
+app.include_router(stocks.router,    prefix=f"{API_PREFIX}/stocks",    tags=["Stocks"])
+app.include_router(valuation.router, prefix=f"{API_PREFIX}/valuation", tags=["Valuation"])
+app.include_router(ml_router.router, prefix=f"{API_PREFIX}/ml",        tags=["ML"])
+app.include_router(ai_router.router, prefix=f"{API_PREFIX}/ai",        tags=["AI"])
+app.include_router(screener.router,  prefix=f"{API_PREFIX}/screener",  tags=["Screener"])
+app.include_router(watchlist.router, prefix=f"{API_PREFIX}/watchlist", tags=["Watchlist"])
+app.include_router(alerts.router,    prefix=f"{API_PREFIX}/alerts",    tags=["Alerts"])
+app.include_router(portfolio.router, prefix=f"{API_PREFIX}/portfolio", tags=["Portfolio"])
+app.include_router(sectors.router,   prefix=f"{API_PREFIX}/sectors",   tags=["Sectors"])
+app.include_router(backtest.router,  prefix=f"{API_PREFIX}/backtest",  tags=["Backtest"])
+app.include_router(admin.router,     prefix=f"{API_PREFIX}/admin",     tags=["Admin"])
+app.include_router(fo.router,        prefix=f"{API_PREFIX}/fo",        tags=["F&O"])
+app.include_router(ws.router,        prefix="/api/v1",                  tags=["WebSocket"])
+app.include_router(auth.router,      prefix=f"{API_PREFIX}",           tags=["Auth"])
+
+
+# ─────────────────────────────────────────────────────────────
+# Health Check
+# ─────────────────────────────────────────────────────────────
+@app.get("/health", tags=["Health"])
+async def health_check():
+    return {
+        "status": "ok",
+        "app": "StockLens",
+        "version": "1.0.0",
+        "env": settings.APP_ENV,
+    }
+
+
+@app.get("/", tags=["Root"])
+async def root():
+    return {
+        "message": "StockLens API",
+        "docs": "/docs",
+        "health": "/health",
+    }

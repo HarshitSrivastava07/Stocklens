@@ -3,5 +3,9 @@ __pycache__/
 *.pyo
 .venv/
 venv/
+.pytest_cache/
+.mypy_cache/
 .env
 .env.*
+*_error.txt
+run-api.bat
