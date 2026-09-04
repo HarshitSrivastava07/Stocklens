@@ -17,6 +17,7 @@ Run from stocklens root:
 """
 import asyncio
 import logging
+import os
 import random
 import sys
 import time
@@ -36,7 +37,9 @@ import psycopg2
 import psycopg2.extras
 import httpx
 
-DB_URL = "postgresql://postgres:password@localhost:5432/stocklens"
+DB_URL = os.environ.get(
+    "DATABASE_SYNC_URL", "postgresql://postgres:password@localhost:5432/stocklens"
+)
 
 SIGNAL_VALUES = {
     "GREEN":  "POTENTIALLY_UNDERVALUED",

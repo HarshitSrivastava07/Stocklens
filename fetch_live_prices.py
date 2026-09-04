@@ -16,6 +16,7 @@ Requires: pip install httpx psycopg2-binary
 """
 import asyncio
 import logging
+import os
 import sys
 import time
 from datetime import datetime, timezone
@@ -39,7 +40,9 @@ import psycopg2
 import psycopg2.extras
 
 # ── Config ────────────────────────────────────────────────────
-DB_URL      = "postgresql://postgres:password@localhost:5432/stocklens"
+DB_URL      = os.environ.get(
+    "DATABASE_SYNC_URL", "postgresql://postgres:password@localhost:5432/stocklens"
+)
 CONCURRENCY = 8          # conservative — Yahoo bans on high concurrency
 TIMEOUT     = 15         # seconds per request
 DELAY_AFTER_BATCH = 1.5  # seconds between batches of CONCURRENCY

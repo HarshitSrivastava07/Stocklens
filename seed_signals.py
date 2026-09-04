@@ -21,6 +21,7 @@ Run from stocklens root:
     python seed_signals.py
     (run fetch_live_prices.py AFTER this to get real prices)
 """
+import os
 import random
 import sys
 
@@ -31,7 +32,9 @@ except ImportError:
     subprocess.check_call([sys.executable, "-m", "pip", "install", "psycopg2-binary"])
     import psycopg2
 
-DB_URL = "postgresql://postgres:password@localhost:5432/stocklens"
+DB_URL = os.environ.get(
+    "DATABASE_SYNC_URL", "postgresql://postgres:password@localhost:5432/stocklens"
+)
 
 SIGNAL_LABELS = {
     "GREEN":  "Potentially Undervalued",
