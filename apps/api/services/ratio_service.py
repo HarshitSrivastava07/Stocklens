@@ -28,11 +28,20 @@ def _safe_div(a, b, default=None):
 
 
 def _cagr(end_val, start_val, years: int) -> Optional[float]:
-    """Compute CAGR: (end/start)^(1/years) - 1"""
+    """Compute CAGR: (end/start)^(1/years) - 1
+
+    Undefined when either endpoint is non-positive. Guarding only start_val
+    isn't enough: a loss-making latest year makes the ratio negative, and a
+    fractional power of a negative float returns a *complex* number in Python,
+    which then raises TypeError on every downstream comparison.
+    """
     try:
-        if start_val is None or end_val is None or start_val <= 0 or years <= 0:
+        if start_val is None or end_val is None or years <= 0:
             return None
-        return (float(end_val) / float(start_val)) ** (1.0 / years) - 1.0
+        start_val, end_val = float(start_val), float(end_val)
+        if start_val <= 0 or end_val <= 0:
+            return None
+        return (end_val / start_val) ** (1.0 / years) - 1.0
     except Exception:
         return None
 
@@ -250,13 +259,17 @@ async def run_ratio_engine():
                     ratio_obj = FinancialRatio(nse_symbol=stock.nse_symbol, **ratios)
                     db.add(ratio_obj)
 
+                # Commit per stock so one bad row can't discard the whole batch.
+                await db.commit()
                 success += 1
 
             except Exception as e:
+                # Without the rollback the session stays in a failed transaction
+                # and every remaining stock dies with PendingRollbackError.
+                await db.rollback()
                 log.warning(f"Ratio failed for {stock.nse_symbol}: {e}")
                 failed += 1
 
-        await db.commit()
         log.info(f"Ratio engine done: success={success}, failed={failed}")
 
         # Audit log

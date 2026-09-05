@@ -397,13 +397,17 @@ async def run_valuation_engine():
                     )
                     db.add(rdcf_obj)
 
+                # Commit per stock so one bad row can't discard the whole batch.
+                await db.commit()
                 success += 1
 
             except Exception as e:
+                # Without the rollback the session stays in a failed transaction
+                # and every remaining stock dies with PendingRollbackError.
+                await db.rollback()
                 log.error(f"Valuation failed for {stock.nse_symbol}: {e}")
                 failed += 1
 
-        await db.commit()
         log.info(f"Valuation engine done: success={success}, skipped={skipped}, failed={failed}")
 
         audit = AuditLog(

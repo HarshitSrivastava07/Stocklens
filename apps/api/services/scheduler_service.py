@@ -105,8 +105,9 @@ async def job_corporate_actions():
 
 
 async def job_fundamentals_refresh():
-    log.info("FUNDAMENTALS REFRESH: Fetching BSE quarterly results XML")
-    # TODO: download BSE XML feeds, parse, upsert financial_results
+    log.info("FUNDAMENTALS REFRESH: Fetching annual financials")
+    from services.fundamentals_service import run_fundamentals_refresh
+    await run_fundamentals_refresh()
 
 
 async def job_ratio_engine():

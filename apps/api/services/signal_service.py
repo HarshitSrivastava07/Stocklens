@@ -188,13 +188,17 @@ async def run_signal_engine():
                     sig_obj = Signal(nse_symbol=sym, **new_sig, computed_at=datetime.now(timezone.utc), updated_at=datetime.now(timezone.utc))
                     db.add(sig_obj)
 
+                # Commit per stock so one bad row can't discard the whole batch.
+                await db.commit()
                 success += 1
 
             except Exception as e:
+                # Without the rollback the session stays in a failed transaction
+                # and every remaining stock dies with PendingRollbackError.
+                await db.rollback()
                 log.error(f"Signal failed for {stock.nse_symbol}: {e}")
                 failed += 1
 
-        await db.commit()
         log.info(f"Signal engine done: success={success}, changed={changed}, failed={failed}")
 
         audit = AuditLog(action="SIGNAL_ENGINE_RUN", details={"success": success, "changed": changed, "failed": failed})
