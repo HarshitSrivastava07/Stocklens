@@ -83,6 +83,28 @@ written in place. It is a containment switch, not a data deletion.
 `revert_change.py verify` cross-checks them against git and fails if a change
 is recorded in one place but not the other.
 
+### A second limitation: git tags are local only
+
+Every change is tagged `change/C0xx`, but **pushing tags is blocked** in the
+environment this was built in — the git proxy answers `403` to a tag push while
+accepting the branch itself.
+
+This costs nothing functionally. `CHANGES_REGISTRY.json` carries the commit SHA
+for all 43 tagged changes, and `revert_change.py` resolves from the SHA, not the
+tag. `show`, `revert` and `verify` all work as documented against a fresh clone.
+
+To recreate the tags locally if you want them:
+
+```bash
+python - <<'EOF'
+import json, subprocess
+for c in json.load(open("CHANGES_REGISTRY.json"))["changes"]:
+    if c.get("commit") and c.get("tag"):
+        subprocess.run(["git", "tag", "-f", c["tag"], c["commit"]])
+EOF
+git push --tags origin     # works from a machine without the proxy restriction
+```
+
 ### One honest limitation
 
 Changes **C003 – C015** were all committed together in `2f890cb` before this
