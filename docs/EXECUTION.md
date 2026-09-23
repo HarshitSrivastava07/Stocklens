@@ -1,5 +1,25 @@
 # StockLens — Execution
 
+> ### ⚠️ Status of this document
+>
+> This is an audit of the codebase **as it stood at commit `48a1698`**, before the
+> rebuild recorded in [`CLAUDE_CHANGES.md`](../CLAUDE_CHANGES.md). Several findings
+> below are now out of date — in particular:
+>
+> | This document says | Current state |
+> |---|---|
+> | Valuation / ML / signal engines are placeholders fed by random mock data | Rebuilt on real filings. See changes **C006**, **C010**, **C011** |
+> | `seed_dev_data.py` / `seed_all_stocks_dev.py` populate the analytics tables | Both **deleted** — they fabricated data. See **C024** |
+> | Most analytics tables have no real writer | Written by `services/ingest_service.py`. See **C018** |
+> | `seed_all_stocks_dev.py` has an `ml_cluster_results` schema bug | Moot; the script is gone |
+>
+> It is kept because its description of the *original* architecture and its
+> file-by-file inventory remain accurate and useful. Treat any "PLACEHOLDER",
+> "mock" or "random" finding as historical.
+
+---
+
+
 > This document explains what actually happens when you install, configure, and run the parts of StockLens that exist in this repository. Commands are transcribed from code and file headers — none are invented. Where something could not be safely or completely verified by running it, it is marked **NOT VERIFIED AT RUNTIME**.
 
 ## 1. Prerequisites
@@ -72,8 +92,8 @@ All commands below are transcribed directly from `if __name__ == "__main__":` bl
 | `python scripts/parse_financials.py --file FILE.xlsx (--symbol SYM \| --auto)` | Parse a Screener.in Excel export into `financial_results` | `parse_financials.py:main()` |
 | `python scripts/seed_sectors.py` | Seed `sector_classification` and tag `stocks.sector_id` from a static symbol map | `seed_sectors.py:run()` |
 | `python scripts/seed_global_stocks.py [--exchange NYSE] [--force]` | Seed ~1,750 global-index stocks with `yahoo_ticker`s | `seed_global_stocks.py` (module-level `main`, per docstring) |
-| `python scripts/seed_dev_data.py` | Seed realistic mock dev data (only if DB is empty) | `seed_dev_data.py` |
-| `python scripts/seed_all_stocks_dev.py` | Populate mock financials/ratios/valuations/ML-scores/signals/price-history for **every** active stock currently in the DB | `seed_all_stocks_dev.py:run()` |
+| `python scripts/seed_universe.py` | Import the real NSE equity list | `services/universe_service.py` |
+| `python scripts/run_pipeline.py` | Fetch real prices, 10y history and filings, then compute technicals, valuations and signals | `services/ingest_service.py:run_full_pipeline()` |
 | `psql $DATABASE_URL -f supabase/migrations/<file>.sql` | Apply a schema migration | n/a (raw SQL) |
 | `docker build -t stocklens-worker apps/worker` then `docker run ... stocklens-worker` | Build/run the worker in a container | `apps/worker/Dockerfile` |
 
@@ -113,9 +133,9 @@ No dedicated "dev mode" exists for the worker — it runs the same code path in 
 1. Apply migrations manually (§2).
 2. Run `scripts/import_nse_symbols.py` and/or `scripts/seed_global_stocks.py` to populate `stocks`.
 3. Run `scripts/seed_sectors.py` for sector taxonomy.
-4. Run `scripts/seed_dev_data.py` or `scripts/seed_all_stocks_dev.py` for mock financials/ratios/valuations so downstream (non-existent) consumers would have data to read.
+4. Run `scripts/run_pipeline.py` to fetch real prices, price history and filings and compute technicals, valuations and signals from them.
 
-This sequence is **INFERRED** from script docstrings and dependencies between tables (e.g., `seed_all_stocks_dev.py` joins `stocks` and `realtime_quotes`, so stocks — and ideally quotes — should exist first); it is not documented anywhere in the repo as an explicit setup guide.
+This sequence is enforced by `run_full_pipeline()`, which runs the stages in dependency order: history and filings first, then technicals (which regress beta), then valuation (which consumes that beta), then signals.
 
 ## 9. Request Execution
 
@@ -231,7 +251,7 @@ On POSIX systems, `SIGTERM`/`SIGINT` trigger `handle_shutdown()`, which calls `w
 | WebSocket connects then immediately closes | Check the `/v3/feed/market-data-feed/authorize` call succeeds and returns `authorized_redirect_uri`; inspect the monkey-patched `patched_connect()` | `upstox_ws.py` lines ~185-222 |
 | Candles missing in `price_candles_1m` | Check `DATABASE_URL` is reachable from the worker process and that `_write_candle()` isn't logging `"Failed to write candle"` | `candle_builder.py:_write_candle()` |
 | Global stock prices stale/missing | Check `stocks.yahoo_ticker` is populated (run `seed_global_stocks.py`), and check for `"Could not get Yahoo crumb"` in logs (Yahoo may be blocking the scraping headers) | `yahoo_price_fetcher.py:_get_crumb()` |
-| `seed_all_stocks_dev.py` fails partway | Check for the `ml_cluster_results` vs `cluster_results` table-name mismatch documented in ARCHITECTURE.md §8 | `scripts/seed_all_stocks_dev.py` |
+| A pipeline stage fails partway | Query `ingest_runs` for that job: it records counts and the first 50 per-symbol errors | `services/ingest_service.py` |
 | `scratch/test_gemini.py` (or similar) fails with `ModuleNotFoundError: config` | Expected — it depends on `apps/api`, which does not exist in this repo | `scratch/*.py` |
 | Frontend won't run | Expected — there is no `package.json`/app source beyond `store/market.ts` | `apps/web/` |
 
@@ -246,7 +266,7 @@ All logging in every observed file goes to stdout via stdlib `logging` — there
 - Whether `yahoo_price_fetcher.py` successfully authenticates against Yahoo's crumb endpoint (this is a scraping-style integration against an undocumented API and is inherently fragile to Yahoo-side changes).
 - Whether any `scripts/*.py` run to completion against a real database.
 - Whether the Dockerfile builds and runs successfully.
-- Whether `seed_all_stocks_dev.py` actually fails on the `ml_cluster_results` insert (this is a static-analysis finding based on comparing the script's SQL to the schema file — very likely to fail, but not executed to confirm).
+- ~~Whether `seed_all_stocks_dev.py` fails on the `ml_cluster_results` insert~~ — moot: the script fabricated data and has been removed.
 
 Anyone relying on this document to judge whether the system "works" should treat every claim above as **code inspection, not proof of runtime behavior** — the two are explicitly not the same.
 

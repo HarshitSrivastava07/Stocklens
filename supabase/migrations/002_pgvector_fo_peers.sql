@@ -2,25 +2,40 @@
 -- Run after: 001_initial.sql
 -- Requires: CREATE EXTENSION IF NOT EXISTS vector;
 
-CREATE EXTENSION IF NOT EXISTS vector;
+-- Semantic search is optional. Where pgvector is unavailable this section is
+-- skipped with a notice rather than aborting the whole migration, so the rest
+-- of the schema still installs.
+DO $$
+BEGIN
+    CREATE EXTENSION IF NOT EXISTS vector;
+EXCEPTION WHEN OTHERS THEN
+    RAISE NOTICE 'pgvector not available: peer similarity search disabled.';
+END $$;
 
-CREATE TABLE IF NOT EXISTS stock_embeddings (
-    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    nse_symbol      VARCHAR(30) NOT NULL REFERENCES stocks(nse_symbol) ON DELETE CASCADE,
-    content_type    VARCHAR(50) NOT NULL,  -- 'ai_summary', 'fundamentals', 'sector_context'
-    text_content    TEXT,
-    embedding       vector(768),
-    created_at      TIMESTAMPTZ DEFAULT NOW(),
-    UNIQUE (nse_symbol, content_type)
-);
-
--- HNSW index for fast approximate nearest-neighbor search
-CREATE INDEX IF NOT EXISTS idx_stock_embeddings_vector
-    ON stock_embeddings USING hnsw (embedding vector_cosine_ops)
-    WITH (m = 16, ef_construction = 64);
-
-CREATE INDEX IF NOT EXISTS idx_stock_embeddings_symbol
-    ON stock_embeddings(nse_symbol);
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'vector') THEN
+        EXECUTE $ddl$
+            CREATE TABLE IF NOT EXISTS stock_embeddings (
+                id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                nse_symbol      VARCHAR(30) NOT NULL
+                                REFERENCES stocks(nse_symbol) ON DELETE CASCADE,
+                content_type    VARCHAR(50) NOT NULL,
+                text_content    TEXT,
+                embedding       vector(768),
+                created_at      TIMESTAMPTZ DEFAULT NOW(),
+                UNIQUE (nse_symbol, content_type)
+            )
+        $ddl$;
+        EXECUTE 'CREATE INDEX IF NOT EXISTS idx_stock_embeddings_vector '
+                'ON stock_embeddings USING hnsw (embedding vector_cosine_ops) '
+                'WITH (m = 16, ef_construction = 64)';
+        EXECUTE 'CREATE INDEX IF NOT EXISTS idx_stock_embeddings_symbol '
+                'ON stock_embeddings(nse_symbol)';
+    ELSE
+        RAISE NOTICE 'Skipping stock_embeddings: requires pgvector.';
+    END IF;
+END $$;
 
 -- Bhavcopy / NSE EOD staging table
 CREATE TABLE IF NOT EXISTS nse_bhavcopy_staging (
@@ -73,6 +88,16 @@ ALTER TABLE admin_overrides
     ADD COLUMN IF NOT EXISTS applied_to_valuation BOOLEAN DEFAULT FALSE,
     ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ;
 
-COMMENT ON TABLE stock_embeddings IS 'Stores pgvector embeddings for RAG-enhanced AI summaries';
+-- Guarded for the same reason as the table itself: on a host without pgvector
+-- stock_embeddings is never created, and commenting on a missing table aborts
+-- the migration at the very last statement.
+DO $$
+BEGIN
+    IF to_regclass('public.stock_embeddings') IS NOT NULL THEN
+        EXECUTE 'COMMENT ON TABLE stock_embeddings IS '
+                '''Stores pgvector embeddings for RAG-enhanced AI summaries''';
+    END IF;
+END $$;
+
 COMMENT ON TABLE fo_oi_history IS 'Historical F&O open interest data';
 COMMENT ON TABLE peer_groups IS 'Manual or ML-derived peer groups for comparison';

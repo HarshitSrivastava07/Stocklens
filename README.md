@@ -196,7 +196,7 @@ The worker loads `<repo root>/.env` explicitly; the scripts search upward from t
 python scripts/import_nse_symbols.py       # NSE equity list → stocks
 python scripts/seed_sectors.py             # sector taxonomy + stocks.sector_id
 python scripts/seed_global_stocks.py       # ~1,750 global stocks with yahoo_ticker
-python scripts/seed_all_stocks_dev.py      # optional: mock financials/ratios/scores
+python scripts/run_pipeline.py --symbols RELIANCE,TCS,INFY   # fetch real data and compute
 ```
 
 ### 5. Run the worker
@@ -257,8 +257,8 @@ Each script is an independent CLI with its own DB connection — nothing schedul
 | `python scripts/parse_financials.py --file FILE.xlsx (--symbol SYM \| --auto)` | Parse a Screener.in Excel export → `financial_results` |
 | `python scripts/seed_sectors.py` | Seed `sector_classification`, tag `stocks.sector_id` |
 | `python scripts/seed_global_stocks.py [--exchange NYSE] [--force]` | Seed global-index stocks with Yahoo tickers |
-| `python scripts/seed_dev_data.py` | Seed realistic mock dev data (only if the DB is empty) |
-| `python scripts/seed_all_stocks_dev.py` | Mock financials/ratios/valuations/scores/history for every active stock |
+| `python scripts/seed_universe.py` | Import the real NSE equity list into `stocks` |
+| `python scripts/run_pipeline.py` | Fetch real prices, history and filings, then compute technicals, valuations and signals |
 
 Bhavcopy is intended for ~16:30 IST and BSE results for ~17:00 IST, per comments in the scripts.
 
@@ -321,7 +321,7 @@ Tables outside the ingestion path are currently filled only by the dev seed scri
 
 - **No `.gitignore`.** `node_modules/`, `__pycache__/`, and (critically) `apps/worker/upstox_token.json` are not protected from being committed. Add one before pushing anything with a live token.
 - **Duplicate migration prefix.** Both `002_global_stocks.sql` and `002_pgvector_fo_peers.sql` are numbered `002`. Alphabetical order happens to be safe, but the numbering should be fixed.
-- **Table-name mismatch.** `scripts/seed_all_stocks_dev.py` inserts into `ml_cluster_results`; the schema defines `cluster_results`. That insert fails against the current schema.
+- ~~**Table-name mismatch** in `seed_all_stocks_dev.py`~~ — resolved: that script generated fabricated data and has been removed (see `CLAUDE_CHANGES.md`, C024).
 - **Candle partitions end at 2026-12.** `price_candles_1m` has no automatic partition creation — new partitions must be added before January 2027.
 - **`apps/worker/test_ws.py` hardcodes an absolute developer-machine path** in its `load_dotenv(...)` call and will not run elsewhere without editing.
 - **`scratch/*.py` import `from config import settings`** out of an `apps/api` package that does not exist, so they raise `ModuleNotFoundError` as-is.

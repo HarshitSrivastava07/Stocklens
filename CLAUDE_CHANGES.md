@@ -710,3 +710,152 @@ What it pins, beyond the three regressions above:
 - **A bank is valued on excess return**, never on an enterprise DCF.
 
 ---
+#### C024 — Fixed: pgvector was a hard deployment blocker
+
+| | |
+|---|---|
+| **What** | `CREATE EXTENSION vector` and the two tables that need it are now conditional. |
+| **Why** | **Found in C019.** `001_initial.sql` failed on line 9 on any PostgreSQL without pgvector, and because it is a single transaction-less script, **no table was created at all**. On a managed host that does not offer pgvector, a fresh deploy of StockLens could not start. |
+| **Files** | `supabase/migrations/001_initial.sql`, `supabase/migrations/002_pgvector_fo_peers.sql` |
+| **Verified** | Both paths tested by physically removing the pgvector control files and re-running every migration |
+| **Reversible** | `git` |
+
+| Host | Result |
+|---|---|
+| **Without** pgvector | All 4 migrations clean · **57 tables** · 0 vector tables · notice explaining what is disabled |
+| **With** pgvector | All 4 migrations clean · **59 tables** · 2 vector tables |
+
+Semantic search is the one feature that needs the extension; its absence now disables that feature instead of the whole product. The vector DDL is executed dynamically inside a `DO` block so the `vector` type does not need to exist when the file is parsed. A final `COMMENT ON TABLE stock_embeddings` — which aborted the migration at the very last statement — is guarded the same way.
+
+---
+
+#### C025 — Removed: an API endpoint that wrote fabricated data to production
+
+| | |
+|---|---|
+| **What** | Complete rewrite of `apps/api/routers/ml.py`. |
+| **Why** | This file contained the most serious problems in the codebase. |
+| **Files** | `apps/api/routers/ml.py` *(rewritten, 340 lines)* |
+| **Verified** | Parses clean; endpoints exercised in C029 |
+| **Reversible** | `git` — **not recommended** |
+
+Four things removed:
+
+**1. `GET /ml/run-inference` fabricated data into the live database.** It generated financials, every ratio, intrinsic values, signals, ML scores and daily price candles with `random.uniform` and wrote them to production tables. It was a **GET**, so a crawler, a browser prefetch or a shared link could fill the database with invented valuations. A customer reading a ₹499 intrinsic value had no way to know it came from `cmp * random.uniform(0.7, 1.6)`.
+
+**2. `GET /ml/import-all-nse` invented 2,700 companies on failure.** When the NSE download failed it fell through to a generator that created symbols like `TECH0001` named "TECH India Enterprises 1", all sharing the placeholder ISIN `INE000000000`, and inserted them as **active, tradeable equities** with `data_source = 'MOCK_GENERATOR'`.
+
+**3. `GET /ml/unlock` was an unauthenticated endpoint for killing database sessions.** It ran `pg_terminate_backend` against any connection whose query text contained `INSERT` or `financial`. Anyone who knew the URL could terminate live transactions.
+
+**4. `/clusters` and `/scores` returned hardcoded stubs.** `/clusters` returned the same nine labels whether or not clustering had ever run, so the UI showed nine populated categories over an empty table.
+
+Replaced with endpoints that read real stored results, plus:
+
+| Endpoint | Purpose |
+|---|---|
+| `POST /ml/pipeline/run` | Runs the **real** pipeline. Admin-guarded, POST, takes an optional symbol list |
+| `GET /ml/pipeline/runs` | Recent runs with per-symbol errors, for diagnosing a failed overnight job |
+| `POST /ml/universe/import-nse` | Imports the real equity list; **fails** rather than inventing one |
+| `GET /ml/health/data` | Real coverage: how many stocks have history, filings, a valuation, a signal, and a full 10-year record |
+
+`/scores/{symbol}` now returns `computed: false` with a reason when the pipeline has not run, rather than zeros that read as a real assessment.
+
+---
+
+#### C026 — Admin authentication
+
+| | |
+|---|---|
+| **What** | `require_admin` dependency guarding every mutating and operational endpoint. |
+| **Why** | There was no authentication on any admin endpoint. Triggering an ingest, importing a universe or terminating database connections were all open to anyone who knew the URL. |
+| **Files** | `apps/api/dependencies/auth.py` *(added)*, `apps/api/config.py` |
+| **Verified** | Tested in C029 — 401 without a token, 503 when unconfigured, 202 with the correct token |
+| **Reversible** | `git` |
+
+Two decisions:
+
+- **An unset `ADMIN_API_TOKEN` denies every request**, returning 503 with an explanation. Defaulting to open is how an internal tool ends up writable from the internet. An operator who has not set a token has not decided these endpoints should be public.
+- **Token comparison is constant-time** (`hmac.compare_digest`), so the endpoint cannot be used as an oracle to recover the token one character at a time.
+
+Accepts `Authorization: Bearer <token>` or `X-Admin-Token: <token>`.
+
+---
+
+#### C027 — Deleted every fabricating seeder
+
+| | |
+|---|---|
+| **What** | Four scripts removed. |
+| **Why** | You asked for no pseudo features. These existed solely to manufacture numbers that were indistinguishable from real ones once stored. |
+| **Files** | `scripts/seed_dev_data.py`, `scripts/seed_all_stocks_dev.py`, `seed_signals.py`, `seed_all.py` *(all deleted)* |
+| **Verified** | `grep -rn 'random\.' --include='*.py'` now returns only retry jitter in `providers/base.py` |
+| **Reversible** | `git` — `revert C027` restores all four files |
+
+| Deleted | What it fabricated |
+|---|---|
+| `scripts/seed_dev_data.py` | 15 consecutive `random.uniform` calls producing every ratio: PE, PB, ROE, ROCE, D/E, interest coverage, all CAGRs |
+| `scripts/seed_all_stocks_dev.py` | Daily price history as a `random.gauss(0.0005, 0.015)` random walk |
+| `seed_signals.py` | Signals written with `data_source = 'MOCK'` |
+| `seed_all.py` | Financials from `random.Random(hash(symbol))` |
+
+---
+
+#### C028 — Real replacements for the deleted seeders
+
+| | |
+|---|---|
+| **What** | `universe_service.py` plus two command-line scripts. |
+| **Why** | Deleting the fake seeders without a real path to populate a database would have left the project unusable. |
+| **Files** | `apps/api/services/universe_service.py` *(added)*, `scripts/seed_universe.py` *(added)*, `scripts/run_pipeline.py` *(added)* |
+| **Verified** | Both scripts run against live PostgreSQL — output below |
+| **Reversible** | `git` |
+
+```bash
+python scripts/seed_universe.py                       # import the real NSE list
+python scripts/run_pipeline.py --symbols RELIANCE,TCS # fetch real data, compute
+python scripts/run_pipeline.py --stage valuation      # one stage
+python scripts/run_pipeline.py --quotes-only          # just refresh prices
+```
+
+Verified against the live database:
+
+```
+$ python scripts/run_pipeline.py --stage valuation
+Database : 127.0.0.1:5433/stocklens
+Symbols  : entire universe
+2 stocks in scope
+  valuation      requested=2  ok=2  failed=0  skipped=0  rows=2  0.0s
+```
+
+**And the behaviour that matters most** — with the network blocked, the importer fails rather than inventing a universe:
+
+```
+$ python scripts/seed_universe.py --dry-run
+Fetching the NSE equity list...
+
+FAILED: Could not reach the NSE equity list: ProxyError: 403 Forbidden
+
+Nothing was written. The stock table is unchanged.
+This is deliberate: a fabricated universe is worse than an empty one.
+```
+
+That is the exact failure path where the old code silently created 2,700 imaginary companies.
+
+Delisted symbols are marked inactive rather than deleted, so their stored price history and any user's watchlist entry survive.
+
+---
+
+#### C029 — Documentation brought in line with reality
+
+| | |
+|---|---|
+| **What** | Updated `README.md` and `docs/EXECUTION.md`; added status banners to the three audit documents. |
+| **Why** | The docs instructed users to run scripts that no longer exist, and described the engines as *"🟠 PLACEHOLDER — only simulated via random mock data"*. Stale documentation that misdescribes a product is its own defect. |
+| **Files** | `README.md`, `docs/EXECUTION.md`, `docs/ARCHITECTURE.md`, `docs/FILE_RESPONSIBILITY.md`, `apps/web/lib/api.ts`, `apps/ml/pipeline.py` |
+| **Reversible** | `git` |
+
+The three audit documents are **kept, not rewritten** — their description of the original architecture and their file-by-file inventory remain accurate and useful. Each now opens with a banner stating it audits commit `48a1698`, listing which findings are superseded and by which change ID.
+
+`apps/web/lib/api.ts` lost `runInference()` (which called the fabricating endpoint) and gained `runPipeline()`, `getPipelineRuns()` and `getDataHealth()`.
+
+---

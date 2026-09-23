@@ -6,9 +6,24 @@
 
 -- Enable required extensions
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
-CREATE EXTENSION IF NOT EXISTS "vector";
 CREATE EXTENSION IF NOT EXISTS "pg_trgm";   -- for fuzzy symbol search
 CREATE EXTENSION IF NOT EXISTS "btree_gin"; -- for GIN indexes
+
+-- pgvector powers semantic search over news and filings. It is optional:
+-- everything else in StockLens works without it.
+--
+-- This used to be a bare CREATE EXTENSION. On any PostgreSQL where pgvector is
+-- not installed -- which includes several managed hosts -- that aborted the
+-- migration on line 9 and no table was ever created, so a fresh deployment
+-- could not start at all. Now its absence disables one feature instead of the
+-- whole product, and says so.
+DO $$
+BEGIN
+    CREATE EXTENSION IF NOT EXISTS "vector";
+EXCEPTION WHEN OTHERS THEN
+    RAISE NOTICE 'pgvector not available: semantic search will be disabled. %',
+                 'Install it (e.g. postgresql-16-pgvector) and re-run this migration to enable.';
+END $$;
 
 -- ============================================================
 -- SECTION 1: STOCK UNIVERSE
@@ -635,22 +650,33 @@ CREATE TABLE IF NOT EXISTS ai_reports (
 
 CREATE INDEX idx_ai_reports_symbol_type ON ai_reports(nse_symbol, report_type, generated_at DESC);
 
--- pgvector RAG store for financial news/documents
-CREATE TABLE IF NOT EXISTS news_embeddings (
-    id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    nse_symbol      VARCHAR(30) REFERENCES stocks(nse_symbol),
-    sector_id       UUID REFERENCES sector_classification(id),
-    source_url      TEXT,
-    headline        TEXT NOT NULL,
-    content         TEXT,
-    published_at    TIMESTAMPTZ,
-    embedding       vector(768),    -- Gemini text-embedding-004 = 768 dims
-    created_at      TIMESTAMPTZ DEFAULT NOW()
-);
-
-CREATE INDEX idx_news_embedding ON news_embeddings USING ivfflat (embedding vector_cosine_ops)
-    WITH (lists = 100);
-CREATE INDEX idx_news_symbol ON news_embeddings(nse_symbol, published_at DESC);
+-- pgvector RAG store for financial news/documents.
+-- Created only when the extension is present; the DDL is executed dynamically
+-- so the vector type does not need to exist when this file is parsed.
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'vector') THEN
+        EXECUTE $ddl$
+            CREATE TABLE IF NOT EXISTS news_embeddings (
+                id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+                nse_symbol      VARCHAR(30) REFERENCES stocks(nse_symbol),
+                sector_id       UUID REFERENCES sector_classification(id),
+                source_url      TEXT,
+                headline        TEXT NOT NULL,
+                content         TEXT,
+                published_at    TIMESTAMPTZ,
+                embedding       vector(768),
+                created_at      TIMESTAMPTZ DEFAULT NOW()
+            )
+        $ddl$;
+        EXECUTE 'CREATE INDEX IF NOT EXISTS idx_news_embedding ON news_embeddings '
+                'USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100)';
+        EXECUTE 'CREATE INDEX IF NOT EXISTS idx_news_symbol ON news_embeddings'
+                '(nse_symbol, published_at DESC)';
+    ELSE
+        RAISE NOTICE 'Skipping news_embeddings: requires pgvector.';
+    END IF;
+END $$;
 
 -- ============================================================
 -- SECTION 10: ADMIN & OPERATIONS

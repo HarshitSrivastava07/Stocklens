@@ -3,7 +3,7 @@ StockLens ML Pipeline
 Orchestrates: feature engineering → clustering → risk scoring → confidence scoring → fundamental scoring
 
 Run manually:  python pipeline.py
-Or via API:    POST /api/v1/ml/run-inference
+Or via API:    POST /api/v1/ml/pipeline/run  (requires X-Admin-Token)
 """
 import asyncio
 import logging

@@ -1,389 +1,343 @@
+"""
+Scores, clusters and pipeline control.
+
+This router previously contained three things that had no business in a product
+anyone pays for, all removed here:
+
+  * ``GET /run-inference`` fabricated financials, ratios, intrinsic values,
+    signals, ML scores and daily price candles with ``random.uniform`` and wrote
+    them into the live database. It was a **GET**, so a crawler, a browser
+    prefetch or a shared link could fill production with invented valuations.
+  * ``GET /import-all-nse`` fell back, when the NSE download failed, to
+    **inventing 2,700 companies** — "TECH0001 India Enterprises 1", all sharing
+    the placeholder ISIN ``INE000000000`` — and inserting them as active,
+    tradeable equities.
+  * ``GET /unlock`` ran ``pg_terminate_backend`` against any connection whose
+    query text contained ``INSERT``, unauthenticated. That is an open endpoint
+    for killing arbitrary database sessions.
+
+Everything now either reads real stored results or triggers the real pipeline,
+and every mutating endpoint requires the admin token.
+"""
+from __future__ import annotations
+
 import logging
-import random
-import json
-import csv
-import io
-import httpx
-from datetime import date, timedelta
-from fastapi import APIRouter, Depends, BackgroundTasks
-from sqlalchemy.ext.asyncio import AsyncSession
+
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from sqlalchemy import text
-from dependencies.db import get_db, AsyncSessionLocal
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from config import settings
+from dependencies.auth import require_admin
+from dependencies.db import get_db
 
 router = APIRouter()
 log = logging.getLogger("ml_router")
 
-SIGNALS = ["GREEN", "GREEN", "GREEN", "YELLOW", "YELLOW", "RED", "GREY"]
-SIGNAL_LABELS = {
-    "GREEN": "Potentially Undervalued",
-    "YELLOW": "Review Required / Watch",
-    "RED": "Possibly Overvalued / Risk",
-    "GREY": "Insufficient Data",
-}
-CLUSTER_LABELS = [
-    "QUALITY_COMPOUNDER", "DEEP_VALUE", "GARP", "CYCLICAL_RECOVERY",
-    "HIGH_GROWTH_EXPENSIVE", "VALUE_TRAP", "MOMENTUM_TRAP", "DISTRESSED", "LOW_LIQUIDITY"
-]
 
-async def seed_database_task():
-    log.info("Starting optimized background database seeding...")
-    
-    async with AsyncSessionLocal() as db:
-        try:
-            # 1. Fetch all active stocks and their LTP
-            result = await db.execute(text("""
-                SELECT s.nse_symbol, s.company_name, s.exchange, s.currency, COALESCE(q.ltp, 100.0) as cmp
-                FROM stocks s
-                LEFT JOIN realtime_quotes q ON s.nse_symbol = q.nse_symbol
-                WHERE s.is_active = TRUE
-            """))
-            stocks = result.fetchall()
-            
-            success_count = 0
-            for stock in stocks:
-                symbol = stock[0]
-                company_name = stock[1]
-                exchange = stock[2]
-                currency = stock[3]
-                cmp = float(stock[4])
-                
-                # A. Financial Results (last 4 quarters) in one batch
-                fin_placeholders = []
-                fin_params = {"symbol": symbol}
-                for q in range(4):
-                    period_end = date.today() - timedelta(days=90 * q)
-                    growth = 1 + random.uniform(0.05, 0.20)
-                    rev_base = cmp * random.uniform(80, 500)
+# ─────────────────────────────────────────────────────────────
+# Scores — read from what the engines actually computed
+# ─────────────────────────────────────────────────────────────
+@router.get("/scores/{symbol}")
+async def get_scores(symbol: str, db: AsyncSession = Depends(get_db)):
+    """
+    The four component scores behind a stock's signal.
 
-                    fin_placeholders.append(
-                        f"(gen_random_uuid(), :symbol, :period_end_{q}, 'Q', "
-                        f":revenue_{q}, :ebitda_{q}, :pat_{q}, :eps_{q}, "
-                        f"'DEV_SEED', TRUE, 'HIGH', FALSE)"
-                    )
-                    fin_params[f"period_end_{q}"] = period_end
-                    fin_params[f"revenue_{q}"]    = round(rev_base * (growth ** q), 2)
-                    fin_params[f"ebitda_{q}"]     = round(rev_base * 0.22 * (growth ** q), 2)
-                    fin_params[f"pat_{q}"]        = round(rev_base * 0.12 * (growth ** q), 2)
-                    fin_params[f"eps_{q}"]        = round(rev_base * 0.12 / random.uniform(50, 500), 2)
+    Returns ``computed: false`` with a reason when the pipeline has not yet run
+    for this symbol, rather than zeros that look like a real assessment.
+    """
+    symbol = symbol.upper().strip()
+    row = (
+        await db.execute(
+            text(
+                """SELECT value_score, quality_score, momentum_score, risk_score,
+                          composite_score, action, conviction, valuation_confidence,
+                          trend, computed_at
+                     FROM signals
+                    WHERE nse_symbol = :symbol"""
+            ),
+            {"symbol": symbol},
+        )
+    ).mappings().first()
 
-                fin_query = (
-                    "INSERT INTO financial_results "
-                    "(id, nse_symbol, period_end, period_type, revenue, ebitda, pat, eps, "
-                    "data_source, is_verified, confidence_level, has_exceptional) "
-                    f"VALUES {', '.join(fin_placeholders)} "
-                    "ON CONFLICT (nse_symbol, period_type, period_end) DO NOTHING"
-                )
-                await db.execute(text(fin_query), fin_params)
+    if row is None:
+        return {
+            "symbol": symbol,
+            "computed": False,
+            "reason": "No signal computed yet for this symbol.",
+            "scores": None,
+        }
 
-                # B. Financial Ratios
-                # Schema: UniqueConstraint(nse_symbol, as_of_date), NOT NULL: as_of_date, computed_ok
-                # Use DELETE + INSERT for today to avoid broken ON CONFLICT (nse_symbol) issue
-                await db.execute(text("""
-                    DELETE FROM financial_ratios
-                    WHERE nse_symbol = :symbol AND as_of_date = CURRENT_DATE
-                """), {"symbol": symbol})
-                await db.execute(text("""
-                    INSERT INTO financial_ratios
-                        (id, nse_symbol, as_of_date, computed_ok,
-                         pe, pb, ps, ev_ebitda, roe, roce, roa,
-                         ebitda_margin, net_margin, revenue_cagr_3y, pat_cagr_3y,
-                         debt_equity, interest_coverage, cfo_pat,
-                         data_completeness, error_fields)
-                    VALUES
-                        (gen_random_uuid(), :symbol, CURRENT_DATE, TRUE,
-                         :pe, :pb, :ps, :ev_ebitda, :roe, :roce, :roa,
-                         :ebitda_margin, :net_margin, :revenue_cagr_3y, :pat_cagr_3y,
-                         :debt_equity, :interest_coverage, :cfo_pat,
-                         :data_completeness, '[]'::jsonb)
-                """), {
-                    "symbol": symbol,
-                    "pe": round(random.uniform(12, 45), 1),
-                    "pb": round(random.uniform(1.5, 8), 2),
-                    "ps": round(random.uniform(1, 10), 2),
-                    "ev_ebitda": round(random.uniform(8, 25), 1),
-                    "roe": round(random.uniform(0.10, 0.35), 4),
-                    "roce": round(random.uniform(0.12, 0.28), 4),
-                    "roa": round(random.uniform(0.05, 0.15), 4),
-                    "ebitda_margin": round(random.uniform(0.12, 0.35), 4),
-                    "net_margin": round(random.uniform(0.06, 0.20), 4),
-                    "revenue_cagr_3y": round(random.uniform(0.08, 0.22), 4),
-                    "pat_cagr_3y": round(random.uniform(0.06, 0.25), 4),
-                    "debt_equity": round(random.uniform(0, 1.5), 2),
-                    "interest_coverage": round(random.uniform(3, 20), 1),
-                    "cfo_pat": round(random.uniform(0.7, 1.5), 2),
-                    "data_completeness": round(random.uniform(0.65, 0.95), 2),
-                })
-
-                # C. Intrinsic Values
-                # cmp from COALESCE(q.ltp, 100.0) — real price if Yahoo data exists in DB
-                signal_color = random.choice(SIGNALS)
-                iv_base    = cmp * random.uniform(0.7, 1.6)
-                iv_bear    = iv_base * 0.75
-                iv_bull    = iv_base * 1.3
-                iv_blended = iv_bear * 0.25 + iv_base * 0.50 + iv_bull * 0.25
-                upside     = ((iv_blended - cmp) / cmp) * 100 if cmp > 0 else 0
-                mos        = ((iv_blended - cmp) / iv_blended) if iv_blended > 0 else 0
-                # Only store real upside/MoS if price is meaningful (not the 100.0 fallback)
-                has_real_price = not (99.0 <= cmp <= 101.0)
-
-                await db.execute(text("""
-                    INSERT INTO intrinsic_values
-                        (nse_symbol, cmp, iv_bear, iv_base, iv_bull, iv_blended,
-                         upside_pct, margin_of_safety, primary_model, valuation_confidence)
-                    VALUES (:symbol, :cmp, :iv_bear, :iv_base, :iv_bull, :iv_blended,
-                            :upside_pct, :mos, 'DCF', :valuation_confidence)
-                    ON CONFLICT (nse_symbol) DO UPDATE
-                        SET cmp=:cmp, iv_bear=:iv_bear, iv_base=:iv_base,
-                            iv_bull=:iv_bull, iv_blended=:iv_blended,
-                            upside_pct=:upside_pct, margin_of_safety=:mos,
-                            valuation_confidence=:valuation_confidence,
-                            updated_at=NOW()
-                """), {
-                    "symbol":             symbol,
-                    "cmp":                round(cmp, 2) if has_real_price else None,
-                    "iv_bear":            round(iv_bear, 2),
-                    "iv_base":            round(iv_base, 2),
-                    "iv_bull":            round(iv_bull, 2),
-                    "iv_blended":         round(iv_blended, 2),
-                    "upside_pct":         round(upside, 4) if has_real_price else None,
-                    "mos":                round(mos, 4)    if has_real_price else None,
-                    "valuation_confidence": random.choice(["HIGH", "MEDIUM", "MEDIUM", "LOW"]),
-                })
-
-                # D. ML Scores
-                risk = random.randint(15, 75)
-                cluster = random.choice(CLUSTER_LABELS)
-                await db.execute(text("""
-                    INSERT INTO ml_scores
-                        (nse_symbol, fundamental_score, growth_outlook_score, risk_score, risk_level,
-                         risk_drivers, confidence_factors, valuation_confidence)
-                    VALUES (:symbol, :fundamental_score, :growth_outlook_score, :risk_score, :risk_level,
-                            :risk_drivers::jsonb, '[]'::jsonb, :valuation_confidence)
-                    ON CONFLICT (nse_symbol) DO UPDATE
-                        SET fundamental_score=:fundamental_score, growth_outlook_score=:growth_outlook_score,
-                            risk_score=:risk_score, risk_level=:risk_level, risk_drivers=:risk_drivers::jsonb,
-                            valuation_confidence=:valuation_confidence, updated_at=NOW()
-                """), {
-                    "symbol": symbol,
-                    "fundamental_score": random.randint(40, 92),
-                    "growth_outlook_score": random.randint(35, 88),
-                    "risk_score": risk,
-                    "risk_level": "HIGH" if risk > 65 else "MEDIUM" if risk > 40 else "LOW",
-                    "risk_drivers": json.dumps(["High debt", "Margin pressure"] if risk > 60 else ["Cyclical"]),
-                    "valuation_confidence": "HIGH" if upside > 25 else "MEDIUM" if upside > 10 else "LOW",
-                })
-
-                # E. ML Cluster Results
-                # Schema: PK=id (uuid, no server_default), NOT NULL: features_used, feature_values
-                await db.execute(text("""
-                    INSERT INTO ml_cluster_results
-                        (id, nse_symbol, run_date, cluster_label, cluster_id,
-                         features_used, feature_values, algorithm)
-                    VALUES (gen_random_uuid(), :symbol, CURRENT_DATE,
-                            :cluster_label, :cluster_id,
-                            '[]'::jsonb, '{}'::jsonb, 'KMEANS')
-                    ON CONFLICT (nse_symbol, run_date) DO UPDATE
-                        SET cluster_label = EXCLUDED.cluster_label,
-                            cluster_id    = EXCLUDED.cluster_id
-                """), {
-                    "symbol":       symbol,
-                    "cluster_label": cluster,
-                    "cluster_id":   random.randint(0, 8),
-                })
-
-                # F. Signals
-                SIGNAL_VALUES = {
-                    "GREEN": "POTENTIALLY_UNDERVALUED",
-                    "YELLOW": "REVIEW_REQUIRED",
-                    "RED": "AVOID_OVERVALUED",
-                    "GREY": "INSUFFICIENT_DATA",
-                }
-                await db.execute(text("""
-                    INSERT INTO signals
-                        (nse_symbol, signal, signal_color, signal_label, main_reason,
-                         conditions, blocking_flags, data_freshness)
-                    VALUES (:symbol, :signal, :signal_color, :signal_label, :main_reason,
-                            :conditions::jsonb, :blocking_flags::jsonb, 'MOCK')
-                    ON CONFLICT (nse_symbol) DO UPDATE
-                        SET signal=:signal, signal_color=:signal_color, signal_label=:signal_label,
-                            main_reason=:main_reason, conditions=:conditions::jsonb,
-                            blocking_flags=:blocking_flags::jsonb, data_freshness='MOCK', updated_at=NOW()
-                """), {
-                    "symbol": symbol,
-                    "signal": SIGNAL_VALUES[signal_color],
-                    "signal_color": signal_color,
-                    "signal_label": SIGNAL_LABELS[signal_color],
-                    "main_reason": f"Blended IV {currency} {iv_blended:.2f} vs CMP {currency} {cmp:.2f} ({upside:+.1f}%)",
-                    "conditions": json.dumps({"upside_ok": upside > 15, "risk_ok": risk < 60, "fundamental_ok": True}),
-                    "blocking_flags": json.dumps([] if signal_color == "GREEN" else ["Low margin of safety"] if signal_color == "YELLOW" else ["Overvalued"]),
-                })
-
-                # G. Price Candles (last 90 trading days) in one bulk batch
-                candle_placeholders = []
-                candle_params = {"symbol": symbol}
-                price = cmp * 0.85
-                candle_count = 0
-                for i in range(90):
-                    trade_date = date.today() - timedelta(days=90 - i)
-                    if trade_date.weekday() >= 5:
-                        continue
-                    daily_return = random.gauss(0.0005, 0.015)
-                    price *= (1 + daily_return)
-                    day_high = price * random.uniform(1.002, 1.02)
-                    day_low = price * random.uniform(0.98, 0.998)
-                    day_open = random.uniform(day_low, day_high)
-                    
-                    candle_placeholders.append(f"(gen_random_uuid(), :symbol, :trade_date_{i}, :open_{i}, :high_{i}, :low_{i}, :close_{i}, :volume_{i})")
-                    candle_params[f"trade_date_{i}"] = trade_date
-                    candle_params[f"open_{i}"] = round(day_open, 2)
-                    candle_params[f"high_{i}"] = round(day_high, 2)
-                    candle_params[f"low_{i}"] = round(day_low, 2)
-                    candle_params[f"close_{i}"] = round(price, 2)
-                    candle_params[f"volume_{i}"] = random.randint(50000, 2000000)
-                    candle_count += 1
-                
-                if candle_placeholders:
-                    candle_query = f"INSERT INTO price_candles_daily (id, nse_symbol, trade_date, open, high, low, close, volume) VALUES {', '.join(candle_placeholders)} ON CONFLICT (nse_symbol, trade_date) DO NOTHING"
-                    await db.execute(text(candle_query), candle_params)
-
-                success_count += 1
-                # Commit every 20 stocks to keep it chunked and robust
-                if success_count % 20 == 0:
-                    await db.commit()
-                    log.info(f"Background seeding progress: {success_count} stocks committed...")
-            
-            await db.commit()
-            log.info(f"Background seeding completed successfully for {success_count} stocks.")
-        except Exception as e:
-            log.error(f"Error in background seed task: {e}")
-            await db.rollback()
-            try:
-                with open("seed_error.txt", "w") as f:
-                    import traceback
-                    f.write(traceback.format_exc())
-            except:
-                pass
-            return {"status": "error", "message": str(e)}
-
-@router.get("/unlock")
-async def unlock_db(db: AsyncSession = Depends(get_db)):
-    log.info("Terminating hanging PG backend queries to release table locks...")
-    try:
-        # Terminate other sessions that are active or idle in transaction
-        await db.execute(text("""
-            SELECT pg_terminate_backend(pid)
-            FROM pg_stat_activity
-            WHERE pid <> pg_backend_pid()
-              AND (state = 'idle in transaction' OR query LIKE '%INSERT%' OR query LIKE '%financial%')
-        """))
-        await db.commit()
-        return {"status": "success", "message": "Hanging database backends terminated and table locks released."}
-    except Exception as e:
-        await db.rollback()
-        return {"status": "error", "message": str(e)}
-
-@router.get("/run-inference", status_code=202)
-async def run_inference(background_tasks: BackgroundTasks):
-    log.info("Queuing background database seeding task...")
-    background_tasks.add_task(seed_database_task)
-    return {"status": "queued", "message": "Database calculation and mock financials population job triggered in background"}
-
-
-async def import_all_nse_task():
-    log.info("Starting download of full NSE equity list from official archives...")
-    NSE_EQUITY_LIST_URL = "https://nsearchives.nseindia.com/content/equities/EQUITY_L.csv"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "Referer": "https://www.nseindia.com/",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    return {
+        "symbol": symbol,
+        "computed": True,
+        "scores": {
+            "value": _as_float(row["value_score"]),
+            "quality": _as_float(row["quality_score"]),
+            "momentum": _as_float(row["momentum_score"]),
+            "risk": _as_float(row["risk_score"]),
+            "composite": _as_float(row["composite_score"]),
+        },
+        "action": row["action"],
+        "conviction": _as_float(row["conviction"]),
+        "valuation_confidence": row["valuation_confidence"],
+        "trend": row["trend"],
+        "computed_at": row["computed_at"].isoformat() if row["computed_at"] else None,
     }
-    try:
-        async with httpx.AsyncClient(headers=headers, timeout=30, follow_redirects=True) as client:
-            await client.get("https://www.nseindia.com/", timeout=10)
-            res = await client.get(NSE_EQUITY_LIST_URL)
-            res.raise_for_status()
-            content = res.text
-
-        rows = list(csv.DictReader(io.StringIO(content)))
-        log.info(f"Downloaded {len(rows)} NSE equity records. Bulk inserting...")
-
-        async with AsyncSessionLocal() as db:
-            inserted = 0
-            for row in rows:
-                symbol = (row.get("SYMBOL") or row.get("Symbol") or "").strip().upper()
-                name = (row.get("NAME OF COMPANY") or row.get("Company Name") or "").strip()
-                isin = (row.get("ISIN NUMBER") or row.get("ISIN") or "").strip()
-                series = (row.get("SERIES") or row.get("Series") or "EQ").strip()
-                if not symbol or not name or series not in ("EQ", "BE", "BZ", "SM", "ST"):
-                    continue
-                name = "".join(c for c in name if c.isalnum() or c in " .,&()-/").strip()[:200]
-                symbol = "".join(c for c in symbol if c.isalnum() or c in ".-&")[:30]
-
-                await db.execute(text("""
-                    INSERT INTO stocks (id, nse_symbol, company_name, isin, instrument_type, face_value, lot_size, is_nifty50, listing_status, is_active, exchange, currency, data_source)
-                    VALUES (gen_random_uuid(), :symbol, :name, :isin, 'EQ', 10.0, 1, FALSE, 'ACTIVE', TRUE, 'NSE', 'INR', 'NSE_EQUITY_LIST')
-                    ON CONFLICT (nse_symbol) DO NOTHING
-                """), {
-                    "symbol": symbol,
-                    "name": name,
-                    "isin": isin[:12] if isin else None
-                })
-                inserted += 1
-                if inserted % 200 == 0:
-                    await db.commit()
-
-            await db.commit()
-            log.info(f"Successfully imported {inserted} NSE symbols into stocks table.")
-    except Exception as e:
-        log.warning(f"Failed to fetch live NSE list (bot blocked). Falling back to mock generator: {e}")
-        try:
-            async with AsyncSessionLocal() as db:
-                inserted = 0
-                base_names = ["TECH", "BANK", "STEEL", "POWER", "INFRA", "PHARMA", "MOTORS", "CHEM", "ENERGY", "FIN", "FOOD", "RETAIL"]
-                for i in range(1, 2701):
-                    prefix = random.choice(base_names)
-                    symbol = f"{prefix}{i:04d}"
-                    name = f"{prefix} India Enterprises {i}"
-                    await db.execute(text("""
-                        INSERT INTO stocks (id, nse_symbol, company_name, isin, instrument_type, face_value, lot_size, is_nifty50, listing_status, is_active, exchange, currency, data_source)
-                        VALUES (gen_random_uuid(), :symbol, :name, 'INE000000000', 'EQ', 10.0, 1, FALSE, 'ACTIVE', TRUE, 'NSE', 'INR', 'MOCK_GENERATOR')
-                        ON CONFLICT (nse_symbol) DO NOTHING
-                    """), {"symbol": symbol, "name": name})
-                    inserted += 1
-                    if inserted % 200 == 0:
-                        await db.commit()
-                await db.commit()
-                log.info(f"Successfully generated {inserted} mock NSE symbols for development.")
-        except Exception as mock_e:
-            log.error(f"Mock generator also failed: {mock_e}")
-            try:
-                with open("import_error.txt", "w") as f:
-                    import traceback
-                    f.write(traceback.format_exc())
-            except:
-                pass
-
-
-
-@router.get("/import-all-nse", status_code=202)
-async def import_all_nse(background_tasks: BackgroundTasks):
-    log.info("Queuing background task to import all ~2,000+ NSE stocks...")
-    background_tasks.add_task(import_all_nse_task)
-    return {"status": "queued", "message": "Importing all ~2,000+ registered NSE equities from NSE archives in background."}
-
 
 
 @router.get("/clusters")
-async def get_clusters():
-    return {"clusters": [
-        "QUALITY_COMPOUNDER", "DEEP_VALUE", "GARP", "CYCLICAL_RECOVERY",
-        "HIGH_GROWTH_EXPENSIVE", "VALUE_TRAP", "MOMENTUM_TRAP", "DISTRESSED", "LOW_LIQUIDITY"
-    ]}
+async def get_clusters(db: AsyncSession = Depends(get_db)):
+    """
+    Clusters that have actually been computed.
+
+    This used to return a hardcoded list of nine labels whether or not any
+    clustering had ever run, so the UI showed nine populated categories over an
+    empty table.
+    """
+    rows = (
+        await db.execute(
+            text(
+                """SELECT cluster_label, COUNT(*) AS members
+                     FROM cluster_results
+                    GROUP BY cluster_label
+                    ORDER BY members DESC"""
+            )
+        )
+    ).mappings().all()
+
+    if not rows:
+        return {
+            "clusters": [],
+            "computed": False,
+            "reason": "Clustering has not been run. No cluster results are stored.",
+        }
+    return {
+        "clusters": [
+            {"label": r["cluster_label"], "members": r["members"]} for r in rows
+        ],
+        "computed": True,
+    }
+
 
 @router.get("/clusters/{label}")
-async def get_cluster(label: str):
-    return {"label": label, "stocks": []}
+async def get_cluster(label: str, db: AsyncSession = Depends(get_db)):
+    """Members of one cluster, with their current signal."""
+    rows = (
+        await db.execute(
+            text(
+                """SELECT c.nse_symbol, s.company_name, sg.action, sg.composite_score,
+                          iv.upside_pct
+                     FROM cluster_results c
+                     JOIN stocks s  ON s.nse_symbol = c.nse_symbol
+                LEFT JOIN signals sg ON sg.nse_symbol = c.nse_symbol
+                LEFT JOIN intrinsic_values iv ON iv.nse_symbol = c.nse_symbol
+                    WHERE c.cluster_label = :label
+                    ORDER BY sg.composite_score DESC NULLS LAST
+                    LIMIT 200"""
+            ),
+            {"label": label},
+        )
+    ).mappings().all()
 
-@router.get("/scores/{symbol}")
-async def get_scores(symbol: str):
-    return {"symbol": symbol.upper(), "scores": None, "message": "ML scores computed after nightly run"}
+    return {
+        "label": label,
+        "count": len(rows),
+        "stocks": [
+            {
+                "symbol": r["nse_symbol"],
+                "name": r["company_name"],
+                "action": r["action"],
+                "composite_score": _as_float(r["composite_score"]),
+                "upside_pct": _as_float(r["upside_pct"]),
+            }
+            for r in rows
+        ],
+    }
+
+
+# ─────────────────────────────────────────────────────────────
+# Pipeline control — admin only, POST only
+# ─────────────────────────────────────────────────────────────
+@router.post("/pipeline/run", status_code=202, dependencies=[Depends(require_admin)])
+async def run_pipeline(
+    background_tasks: BackgroundTasks,
+    symbols: str | None = Query(
+        default=None,
+        description="Comma-separated symbols. Omit to run the whole universe.",
+    ),
+    skip_history: bool = Query(default=False),
+    skip_fundamentals: bool = Query(default=False),
+):
+    """
+    Run the real ingestion and computation pipeline.
+
+    Fetches live prices, price history and filings from the data provider, then
+    computes technicals, intrinsic values and signals from them. Nothing is
+    generated; if the provider has no data for a symbol, that symbol is recorded
+    as a failure in ``ingest_runs`` and skipped.
+
+    A POST because it mutates, and admin-guarded because it costs real provider
+    quota and rewrites every valuation in the database.
+    """
+    wanted = (
+        [s.strip().upper() for s in symbols.split(",") if s.strip()]
+        if symbols
+        else None
+    )
+
+    async def task() -> None:
+        import asyncpg
+
+        from services.ingest_service import run_full_pipeline
+
+        database_url = settings.DATABASE_SYNC_URL.replace(
+            "postgresql+asyncpg://", "postgresql://"
+        ).replace("postgresql+psycopg2://", "postgresql://")
+        pool = await asyncpg.create_pool(database_url, min_size=2, max_size=8)
+        try:
+            reports = await run_full_pipeline(
+                pool,
+                symbols=wanted,
+                years=settings.HISTORY_YEARS,
+                skip_history=skip_history or not settings.INGEST_HISTORY_ENABLED,
+                skip_fundamentals=skip_fundamentals
+                or not settings.INGEST_FUNDAMENTALS_ENABLED,
+            )
+            log.info("pipeline finished: %s", reports)
+        except Exception:
+            log.exception("pipeline failed")
+        finally:
+            await pool.close()
+
+    background_tasks.add_task(task)
+    return {
+        "status": "queued",
+        "symbols": wanted or "all",
+        "message": "Pipeline started. Track progress in the ingest_runs table.",
+    }
+
+
+@router.get("/pipeline/runs")
+async def pipeline_runs(limit: int = 20, db: AsyncSession = Depends(get_db)):
+    """Recent pipeline runs, so a failed overnight job can be diagnosed."""
+    limit = max(1, min(limit, 200))
+    rows = (
+        await db.execute(
+            text(
+                """SELECT job, status, requested, succeeded, failed, skipped,
+                          rows_written, started_at, finished_at, duration_seconds,
+                          errors
+                     FROM ingest_runs
+                    ORDER BY started_at DESC
+                    LIMIT :limit"""
+            ),
+            {"limit": limit},
+        )
+    ).mappings().all()
+
+    return {
+        "runs": [
+            {
+                "job": r["job"],
+                "status": r["status"],
+                "requested": r["requested"],
+                "succeeded": r["succeeded"],
+                "failed": r["failed"],
+                "skipped": r["skipped"],
+                "rows_written": r["rows_written"],
+                "started_at": r["started_at"].isoformat() if r["started_at"] else None,
+                "finished_at": (
+                    r["finished_at"].isoformat() if r["finished_at"] else None
+                ),
+                "duration_seconds": _as_float(r["duration_seconds"]),
+                "errors": r["errors"],
+            }
+            for r in rows
+        ]
+    }
+
+
+@router.post(
+    "/universe/import-nse", status_code=202, dependencies=[Depends(require_admin)]
+)
+async def import_nse_universe(background_tasks: BackgroundTasks):
+    """
+    Import the official NSE equity list.
+
+    If the download fails, this **fails**. The previous implementation fell back
+    to inventing 2,700 companies with a placeholder ISIN and inserting them as
+    active tradeable equities — a fabricated universe is far worse than an empty
+    one, because nothing downstream can tell the difference.
+    """
+
+    async def task() -> None:
+        from services.universe_service import import_nse_equity_list
+
+        try:
+            report = await import_nse_equity_list()
+            log.info("NSE universe import: %s", report)
+        except Exception:
+            log.exception(
+                "NSE universe import failed. No symbols were invented; "
+                "the stock table is unchanged."
+            )
+
+    background_tasks.add_task(task)
+    return {
+        "status": "queued",
+        "message": "Importing the NSE equity list. On failure nothing is written.",
+    }
+
+
+@router.get("/health/data")
+async def data_health(db: AsyncSession = Depends(get_db)):
+    """
+    How much of the universe actually has real data behind it.
+
+    Exists so an operator can see coverage at a glance instead of discovering a
+    gap when a customer opens an empty stock page.
+    """
+    row = (
+        await db.execute(
+            text(
+                """SELECT
+                     (SELECT count(*) FROM stocks WHERE is_active) AS active_stocks,
+                     (SELECT count(DISTINCT nse_symbol) FROM price_candles_daily) AS with_history,
+                     (SELECT count(DISTINCT nse_symbol) FROM financial_results
+                       WHERE period_type = 'A') AS with_filings,
+                     (SELECT count(*) FROM intrinsic_values
+                       WHERE iv_blended IS NOT NULL) AS with_valuation,
+                     (SELECT count(*) FROM signals
+                       WHERE action IS NOT NULL) AS with_signal,
+                     (SELECT count(*) FROM realtime_quotes
+                       WHERE last_updated > NOW() - INTERVAL '1 day') AS fresh_quotes,
+                     (SELECT count(*) FROM intrinsic_values
+                       WHERE years_of_history >= 10) AS ten_year_histories"""
+            )
+        )
+    ).mappings().first()
+
+    active = row["active_stocks"] or 0
+
+    def share(n: int | None) -> float | None:
+        return None if not active else round((n or 0) / active * 100, 1)
+
+    return {
+        "active_stocks": active,
+        "coverage": {
+            "price_history": {"count": row["with_history"], "pct": share(row["with_history"])},
+            "annual_filings": {"count": row["with_filings"], "pct": share(row["with_filings"])},
+            "valuation": {"count": row["with_valuation"], "pct": share(row["with_valuation"])},
+            "signal": {"count": row["with_signal"], "pct": share(row["with_signal"])},
+            "fresh_quotes": {"count": row["fresh_quotes"], "pct": share(row["fresh_quotes"])},
+            "full_ten_year_history": {
+                "count": row["ten_year_histories"],
+                "pct": share(row["ten_year_histories"]),
+            },
+        },
+    }
+
+
+def _as_float(value) -> float | None:
+    return None if value is None else float(value)

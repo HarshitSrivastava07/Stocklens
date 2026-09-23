@@ -306,6 +306,89 @@
       "flag": null,
       "commit": "ca3e527",
       "tag": "change/C023"
+    },
+    {
+      "id": "C024",
+      "title": "Fix: pgvector was a hard deployment blocker",
+      "files": [
+        "supabase/migrations/001_initial.sql",
+        "supabase/migrations/002_pgvector_fo_peers.sql"
+      ],
+      "reversible": "git",
+      "risk": "Fresh deploys fail entirely on any host without pgvector.",
+      "flag": null,
+      "commit": "79a062d",
+      "tag": "change/C024"
+    },
+    {
+      "id": "C025",
+      "title": "Removed: an API endpoint that wrote fabricated data to production",
+      "files": [
+        "apps/api/routers/ml.py"
+      ],
+      "reversible": "git",
+      "risk": "Restores endpoints that write invented valuations to production and kill DB sessions. Do not revert.",
+      "flag": null,
+      "commit": "79a062d",
+      "tag": "change/C025"
+    },
+    {
+      "id": "C026",
+      "title": "Admin authentication",
+      "files": [
+        "apps/api/dependencies/auth.py",
+        "apps/api/config.py"
+      ],
+      "reversible": "git",
+      "risk": "Leaves every mutating endpoint open to anyone who knows the URL.",
+      "flag": null,
+      "commit": "79a062d",
+      "tag": "change/C026"
+    },
+    {
+      "id": "C027",
+      "title": "Deleted every fabricating seeder",
+      "files": [
+        "scripts/seed_dev_data.py",
+        "scripts/seed_all_stocks_dev.py",
+        "seed_signals.py",
+        "seed_all.py"
+      ],
+      "reversible": "git",
+      "risk": "Restores four scripts that write random numbers into the analytics tables.",
+      "flag": null,
+      "commit": "79a062d",
+      "tag": "change/C027"
+    },
+    {
+      "id": "C028",
+      "title": "Real replacements for the deleted seeders",
+      "files": [
+        "apps/api/services/universe_service.py",
+        "scripts/seed_universe.py",
+        "scripts/run_pipeline.py"
+      ],
+      "reversible": "git",
+      "risk": "Leaves no supported way to populate a database with real data.",
+      "flag": null,
+      "commit": "79a062d",
+      "tag": "change/C028"
+    },
+    {
+      "id": "C029",
+      "title": "Documentation brought in line with reality",
+      "files": [
+        "README.md",
+        "docs/EXECUTION.md",
+        "docs/ARCHITECTURE.md",
+        "docs/FILE_RESPONSIBILITY.md",
+        "apps/web/lib/api.ts"
+      ],
+      "reversible": "git",
+      "risk": "Docs revert to instructing users to run deleted scripts.",
+      "flag": null,
+      "commit": "79a062d",
+      "tag": "change/C029"
     }
   ]
 }

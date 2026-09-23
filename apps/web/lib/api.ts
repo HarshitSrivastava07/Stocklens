@@ -61,12 +61,22 @@ export const stocksApi = {
   getRiskFlags: (symbol: string) => fetchApi(`/api/v1/stocks/${symbol}/risk-flags`),
 };
 
-// ── ML ───────────────────────────────────────────────────────
+// ── Scores & pipeline ────────────────────────────────────────
 export const mlApi = {
   getClusters: () => fetchApi("/api/v1/ml/clusters"),
   getCluster: (label: string) => fetchApi(`/api/v1/ml/clusters/${label}`),
   getScores: (symbol: string) => fetchApi(`/api/v1/ml/scores/${symbol}`),
-  runInference: () => fetchApi("/api/v1/ml/run-inference", { method: "POST" }),
+  // Replaces the old runInference(), which called an endpoint that generated
+  // fabricated valuations and signals. This one runs the real pipeline and
+  // requires an admin token.
+  runPipeline: (adminToken: string, symbols?: string) =>
+    fetchApi(
+      `/api/v1/ml/pipeline/run${symbols ? `?symbols=${encodeURIComponent(symbols)}` : ""}`,
+      { method: "POST", headers: { "X-Admin-Token": adminToken } },
+    ),
+  getPipelineRuns: (limit = 20) =>
+    fetchApi(`/api/v1/ml/pipeline/runs?limit=${limit}`),
+  getDataHealth: () => fetchApi("/api/v1/ml/health/data"),
 };
 
 // ── AI ───────────────────────────────────────────────────────

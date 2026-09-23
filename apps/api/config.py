@@ -76,6 +76,12 @@ class Settings(BaseSettings):
     AI_RATE_LIMIT_PER_MIN: int = 10
     VALUATION_RATE_LIMIT_PER_MIN: int = 5
 
+    # ── Admin access ──────────────────────────────────────────
+    # Guards every mutating and operational endpoint. When empty those
+    # endpoints refuse all requests rather than allowing them: an operator who
+    # has not set a token has not decided that they should be public.
+    ADMIN_API_TOKEN: str = ""
+
     # ── Feature flags ─────────────────────────────────────────
     # Every engine added on top of the original codebase can be switched off
     # here without touching code or reverting a commit. A flag set to false

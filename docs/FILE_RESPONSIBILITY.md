@@ -1,5 +1,25 @@
 # StockLens — File Responsibility Reference
 
+> ### ⚠️ Status of this document
+>
+> This is an audit of the codebase **as it stood at commit `48a1698`**, before the
+> rebuild recorded in [`CLAUDE_CHANGES.md`](../CLAUDE_CHANGES.md). Several findings
+> below are now out of date — in particular:
+>
+> | This document says | Current state |
+> |---|---|
+> | Valuation / ML / signal engines are placeholders fed by random mock data | Rebuilt on real filings. See changes **C006**, **C010**, **C011** |
+> | `seed_dev_data.py` / `seed_all_stocks_dev.py` populate the analytics tables | Both **deleted** — they fabricated data. See **C024** |
+> | Most analytics tables have no real writer | Written by `services/ingest_service.py`. See **C018** |
+> | `seed_all_stocks_dev.py` has an `ml_cluster_results` schema bug | Moot; the script is gone |
+>
+> It is kept because its description of the *original* architecture and its
+> file-by-file inventory remain accurate and useful. Treat any "PLACEHOLDER",
+> "mock" or "random" finding as historical.
+
+---
+
+
 > Scope: every file in the repository that is not third-party (`node_modules/`) or a build cache (`__pycache__/`). Status values follow the classification defined in `ARCHITECTURE.md` §20.
 
 ## 1. Repository Structure
