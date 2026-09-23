@@ -31,6 +31,7 @@ from routers import (
     ws,
     fo,
     auth,
+    research,
 )
 from services.scheduler_service import start_scheduler, stop_scheduler
 
@@ -178,6 +179,7 @@ app.include_router(sectors.router,   prefix=f"{API_PREFIX}/sectors",   tags=["Se
 app.include_router(backtest.router,  prefix=f"{API_PREFIX}/backtest",  tags=["Backtest"])
 app.include_router(admin.router,     prefix=f"{API_PREFIX}/admin",     tags=["Admin"])
 app.include_router(fo.router,        prefix=f"{API_PREFIX}/fo",        tags=["F&O"])
+app.include_router(research.router,  prefix=f"{API_PREFIX}/research",  tags=["Research"])
 app.include_router(ws.router,        prefix="/api/v1",                  tags=["WebSocket"])
 app.include_router(auth.router,      prefix=f"{API_PREFIX}",           tags=["Auth"])
 

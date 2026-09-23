@@ -9,7 +9,6 @@ import os
 import re
 from datetime import datetime, timedelta, timezone
 
-import google.genai as genai
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
@@ -19,11 +18,46 @@ from dependencies.redis import get_redis_client
 from models.db_models import AIReport, Stock, IntrinsicValue, MLScores, Signal, RealtimeQuote
 from config import settings
 
-router = APIRouter()
 log = logging.getLogger("ai_router")
+router = APIRouter()
 
-# Configure Gemini — new google-genai SDK uses a Client instance, not genai.configure()
-_gemini_client = genai.Client(api_key=settings.GEMINI_API_KEY) if settings.GEMINI_API_KEY else None
+# The Gemini SDK is an optional dependency. Importing it at module scope meant
+# that on a deployment without it installed, `from routers import ai` raised
+# ModuleNotFoundError and **the entire API failed to start** — every endpoint,
+# including the ones that have nothing to do with AI. An optional feature must
+# not be able to take the whole service down.
+try:
+    import google.genai as genai
+
+    _GENAI_AVAILABLE = True
+except ImportError:  # pragma: no cover - depends on deployment
+    genai = None  # type: ignore[assignment]
+    _GENAI_AVAILABLE = False
+    log.warning(
+        "google-genai is not installed; AI endpoints will return 503. "
+        "Install it to enable them."
+    )
+
+_gemini_client = (
+    genai.Client(api_key=settings.GEMINI_API_KEY)
+    if _GENAI_AVAILABLE and settings.GEMINI_API_KEY
+    else None
+)
+
+
+def _require_gemini():
+    """Raise a clear 503 rather than an AttributeError deep inside a handler."""
+    if not _GENAI_AVAILABLE:
+        raise HTTPException(
+            status_code=503,
+            detail="AI features are unavailable: the google-genai package is not installed.",
+        )
+    if _gemini_client is None:
+        raise HTTPException(
+            status_code=503,
+            detail="AI features are unavailable: GEMINI_API_KEY is not configured.",
+        )
+    return _gemini_client
 
 SYSTEM_PROMPT = """You are a financial research assistant for a personal stock analysis tool.
 Your role is to summarize available data clearly and objectively.
@@ -211,10 +245,9 @@ async def generate_ai_summary(
 
     # Generate with Gemini — new google-genai SDK uses client.models.generate_content()
     try:
-        if not _gemini_client:
-            raise HTTPException(status_code=503, detail="AI not configured. Set GEMINI_API_KEY in .env")
+        client = _require_gemini()
 
-        response = _gemini_client.models.generate_content(
+        response = client.models.generate_content(
             model=settings.GEMINI_MODEL_FAST,
             contents=f"Provide a research summary for this stock based on the following data:\n\n{context}",
             config=genai.types.GenerateContentConfig(
@@ -324,14 +357,23 @@ Based on this aggregate data from my valuation models:
 Cover: sector characteristics, current signal distribution, key risks for this sector.
 Maximum 250 words. Research only, not investment advice."""
 
+    # This used genai.GenerativeModel(...), which belongs to the deprecated
+    # google-generativeai package and does not exist in google-genai. The call
+    # raised AttributeError at runtime even with the SDK correctly installed.
+    client = _require_gemini()
     try:
-        model = genai.GenerativeModel(
-            model_name=settings.GEMINI_MODEL_FAST,
-            generation_config=genai.types.GenerationConfig(max_output_tokens=400, temperature=0.3),
-            system_instruction=SYSTEM_PROMPT,
+        response = client.models.generate_content(
+            model=settings.GEMINI_MODEL_FAST,
+            contents=sector_prompt,
+            config=genai.types.GenerateContentConfig(
+                system_instruction=SYSTEM_PROMPT,
+                max_output_tokens=400,
+                temperature=0.3,
+            ),
         )
-        response = model.generate_content(sector_prompt)
         content = _sanitize_output(response.text)
+    except HTTPException:
+        raise
     except Exception as e:
         log.error(f"Gemini sector summary error for {sector}: {e}")
         raise HTTPException(status_code=503, detail="AI service temporarily unavailable")
@@ -398,14 +440,21 @@ Explain:
 
 Keep it clear, factual, 300 words max. No buy/sell language."""
 
+    # Same deprecated-API problem as the sector summary above.
+    client = _require_gemini()
     try:
-        model = genai.GenerativeModel(
-            model_name=settings.GEMINI_MODEL_FAST,
-            generation_config=genai.types.GenerationConfig(max_output_tokens=500, temperature=0.2),
-            system_instruction=SYSTEM_PROMPT,
+        response = client.models.generate_content(
+            model=settings.GEMINI_MODEL_FAST,
+            contents=prompt,
+            config=genai.types.GenerateContentConfig(
+                system_instruction=SYSTEM_PROMPT,
+                max_output_tokens=500,
+                temperature=0.2,
+            ),
         )
-        response = model.generate_content(prompt)
         content = _sanitize_output(response.text)
+    except HTTPException:
+        raise
     except Exception as e:
         log.error(f"Gemini DCF explain error for {symbol}: {e}")
         raise HTTPException(status_code=503, detail="AI service temporarily unavailable")

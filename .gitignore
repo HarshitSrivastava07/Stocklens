@@ -94,3 +94,11 @@ logs/
 # Upstox token cache (auto-refreshed daily)
 # ============================================================
 apps/worker/upstox_token.json
+
+# Python bytecode — was being committed from apps/worker
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Local virtualenv
+.venv/
