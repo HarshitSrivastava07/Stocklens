@@ -13,6 +13,16 @@ import { useMarketStore } from "@/store/market";
 import { stocksApi } from "@/lib/api";
 
 // ─── Types ────────────────────────────────────────────────────
+/**
+ * One row of GET /api/v1/stocks.
+ *
+ * This interface had drifted from the endpoint: `exchange`, `currency`,
+ * `currency_symbol`, `change_pct` and `change_abs` were added to the response
+ * when multi-exchange support landed, but never declared here. The page read
+ * them anyway, so `npm run type-check` failed with 11 errors and the
+ * multi-currency formatting silently fell back to rupees for every listing.
+ * Now matched to what the API actually returns.
+ */
 interface StockRow {
   nse_symbol: string;
   company_name: string;
@@ -36,6 +46,22 @@ interface StockRow {
   pe: number | null;
   roe: number | null;
   debt_equity: number | null;
+
+  // Listing and currency
+  exchange: string | null;
+  currency: string | null;
+  currency_symbol: string | null;
+  country: string | null;
+  instrument_type: string | null;
+  yahoo_ticker: string | null;
+
+  // Live price movement
+  change_pct: number | null;
+  change_abs: number | null;
+  week_52_high: number | null;
+  week_52_low: number | null;
+  is_stale: boolean | null;
+  is_mock_price: boolean | null;
 }
 
 const SIGNAL_CONFIG = {
@@ -73,14 +99,22 @@ const CURRENCY_SYMBOLS: Record<string, string> = {
 };
 
 const fmt = {
-  price: (v: number | null, symbol = "₹") => v == null ? "—" : `${symbol}${v.toLocaleString(symbol === "₹" ? "en-IN" : "en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
+  // The API can return a null currency symbol, so the formatter accepts one and
+  // falls back, rather than every call site casting the problem away.
+  price: (v: number | null, symbol: string | null | undefined = "₹") => {
+    const sym = symbol ?? "₹";
+    return v == null
+      ? "—"
+      : `${sym}${v.toLocaleString(sym === "₹" ? "en-IN" : "en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  },
   pct: (v: number | null) => v == null ? "—" : `${v > 0 ? "+" : ""}${v.toFixed(1)}%`,
   score: (v: number | null) => v == null ? "—" : v.toString(),
   num: (v: number | null, dec = 1) => v == null ? "—" : v.toFixed(dec),
-  cr: (v: number | null, currency = "INR") => {
+  cr: (v: number | null, currency: string | null | undefined = "INR") => {
     if (v == null) return "—";
-    const symbol = CURRENCY_SYMBOLS[currency] || "$";
-    if (currency === "INR") {
+    const cur = currency ?? "INR";
+    const symbol = CURRENCY_SYMBOLS[cur] || "$";
+    if (cur === "INR") {
       if (v >= 1e7) return `₹${(v / 1e7).toFixed(1)}Cr`;
       if (v >= 1e5) return `₹${(v / 1e5).toFixed(1)}L`;
       return `₹${v.toFixed(0)}`;
@@ -634,9 +668,9 @@ export default function DashboardPage() {
                               <div className="font-mono font-semibold" style={{ color: "var(--text-primary)", fontSize: 13 }}>
                                 {fmt.price(stock.ltp, stock.currency_symbol)}
                               </div>
-                              {(stock as any).change_pct != null && (
-                                <div className={`text-xs font-mono ${(stock as any).change_pct >= 0 ? "price-up" : "price-down"}`}>
-                                  {fmt.pct((stock as any).change_pct)}
+                              {stock.change_pct != null && (
+                                <div className={`text-xs font-mono ${stock.change_pct >= 0 ? "price-up" : "price-down"}`}>
+                                  {fmt.pct(stock.change_pct)}
                                 </div>
                               )}
                             </td>

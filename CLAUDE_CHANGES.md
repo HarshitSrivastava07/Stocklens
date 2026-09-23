@@ -859,3 +859,206 @@ The three audit documents are **kept, not rewritten** — their description of t
 `apps/web/lib/api.ts` lost `runInference()` (which called the fabricating endpoint) and gained `runPipeline()`, `getPipelineRuns()` and `getDataHealth()`.
 
 ---
+#### C030 — Fixed: the AI SDK could take the whole API down
+
+| | |
+|---|---|
+| **What** | The Gemini import is now optional, and two handlers that called a removed SDK API were rewritten. |
+| **Why** | **Found by trying to start the server.** `apps/api/routers/ai.py` imported `google.genai` at module scope. On any deployment without that package installed, `from routers import ai` raised `ModuleNotFoundError` and **the entire API failed to boot** — every endpoint, including all the ones with nothing to do with AI. An optional feature must not be able to take the whole service down. |
+| **Files** | `apps/api/routers/ai.py` |
+| **Verified** | API boots cleanly with the SDK absent, logs a warning, and serves all 63 routes |
+| **Reversible** | `git` |
+
+A second, separate bug in the same file: `/ai/sector-summary` and `/ai/dcf-explain` called `genai.GenerativeModel(...)` and `genai.types.GenerationConfig(...)`. Those belong to the **deprecated `google-generativeai` package** and do not exist in `google-genai`, which the project actually depends on. Both endpoints would have raised `AttributeError` at runtime *even with the SDK correctly installed*. The third handler in the same file already used the current client API, so the file was mixing two incompatible SDK generations. Both are now on the current API.
+
+AI endpoints return a clear 503 — naming whether the package or the key is missing — instead of failing deep inside a handler.
+
+---
+
+#### C031 — Research API
+
+| | |
+|---|---|
+| **What** | New `research` router: chart, overview, valuation detail, fundamentals, peers, notes, search. |
+| **Why** | The backend for your request: *click a stock, see its historical graphs, and research it*. |
+| **Files** | `apps/api/routers/research.py` *(added, 1,000 lines)*, `apps/api/main.py` |
+| **Verified** | Every endpoint exercised against the running API and a real database |
+| **Reversible** | `git` |
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /research/{symbol}/chart?range=` | OHLCV over 1M–MAX, resampled when long |
+| `GET /research/{symbol}/overview` | The whole page above the fold in one round trip |
+| `GET /research/{symbol}/valuation` | Full audit trail: every assumption, the 10-year projection year by year, each model's answer, the measured history, the reverse DCF |
+| `GET /research/{symbol}/fundamentals` | Ten years of filings with derived margins and growth |
+| `GET /research/{symbol}/peers` | Sector peers with their own valuation and signal |
+| `GET/POST/PATCH/DELETE /research/{symbol}/notes` | The research workspace |
+| `GET /research/search?q=` | Symbol and company-name search |
+
+Principles enforced throughout:
+
+- **A number is always served with its provenance.** A valuation carries its assumptions, its history depth and its warnings. A chart says how many sessions it actually has.
+- **Each block reports its own availability** rather than being omitted, so the UI renders "not computed yet" instead of an empty card the user cannot interpret.
+- **Quote staleness is surfaced, not hidden.** `is_stale` and `age_minutes` are in the payload. A price the user cannot tell is two days old is more dangerous than a visibly missing one.
+- **Derived figures are computed on read, never stored**, so margins can never drift out of step with the filings they come from.
+- **A note stamps the price and intrinsic value at the moment it is written**, and those two fields are deliberately **not** editable. A thesis reviewed a year later should be read against what was known when it was formed — letting an edit move them is how hindsight quietly rewrites conviction.
+
+---
+
+#### C032 — Fixed: a stale stock would show an empty chart
+
+| | |
+|---|---|
+| **What** | Fixed-length chart ranges now take the last *N* stored sessions instead of filtering on a calendar window. |
+| **Why** | **Found by testing the endpoint.** `range=1M` filtered `date >= today - 32 days`. A stock whose data stopped updating six months ago would return an **empty 1M chart**, even with five years of real history sitting in the table. An empty chart reads as "this stock does not trade" — a different and wrong statement. A single row with a bad future date, which is an ordinary provider timezone glitch, had the mirror-image effect: it dragged every short range into returning years of data. |
+| **Files** | `apps/api/routers/research.py` — `get_chart` |
+| **Verified** | Every range returns exactly the right session count |
+| **Reversible** | `git` |
+
+```
+1M   points=22    resampled=None       3Y   points=152  resampled=weekly
+3M   points=66    resampled=None       5Y   points=59   resampled=monthly
+6M   points=132   resampled=None      10Y   points=117  resampled=monthly
+1Y   points=252   resampled=None      MAX   points=120  resampled=monthly
+```
+
+Counting back from the newest stored session is also immune to holidays and trading halts, which a calendar window silently miscounts. Year-to-date remains calendar-based, because that is what it means.
+
+---
+
+#### C033 — API verified end to end
+
+| | |
+|---|---|
+| **What** | The API was started against the real database and every new endpoint exercised. |
+| **Files** | — (verification step) |
+| **Reversible** | n/a |
+
+```
+Admin auth      no token -> 401   wrong token -> 401
+                X-Admin-Token -> 202   Authorization: Bearer -> 202
+Notes CRUD      create -> 201 (price 280.00 and IV 499.77 stamped onto the note)
+                list -> 200   patch -> 200   invalid stance -> 400
+                delete -> 204   delete again -> 404
+Errors          unknown symbol -> 404   invalid range -> 400
+Coverage        3 active stocks; 100% with price history and filings;
+                66.7% valued (the index is correctly excluded)
+```
+
+Also confirmed here: the momentum gate is genuinely enforced. A `STRONG_BUY` on a stock with RSI 7.2 looked wrong until the scores were read directly — momentum was **59.6**, above the 45 threshold, because trend and six-month return outweighed one oversold oscillator. The gate is doing its job.
+
+---
+#### C034 — Stock detail page rebuilt
+
+| | |
+|---|---|
+| **What** | Six-tab stock page: chart with range selector, the verdict and trade plan, the full valuation workings, ten years of filings, technicals, peers, and a research workspace. |
+| **Why** | Your request: *click a stock, see its historical graphs, and research it*. |
+| **Files** | `apps/web/app/stocks/[symbol]/page.tsx` *(rewritten, 930 lines)*, `apps/web/components/StockChart.tsx` *(added, 410)*, `apps/web/components/stock/pieces.tsx` *(added, 258)*, `apps/web/lib/api.ts`, `apps/web/app/globals.css` *(+360 lines)* |
+| **Verified** | Built, type-checked, rendered in a real browser, screenshotted on every tab, no console errors |
+| **Reversible** | `git` |
+
+Verified in Chromium against the running API and database:
+
+```
+tabs: Overview, Valuation, Financials, Technicals, Peers, Research
+  Valuation    aria-selected=true   content present: True
+  Financials   aria-selected=true   content present: True
+  Technicals   aria-selected=true   content present: True
+  Peers        aria-selected=true   content present: True
+  Research     aria-selected=true   content present: True
+horizontal overflow at 390px: False      page errors: none
+```
+
+---
+
+#### C035 — Charts built to an explicit visual contract
+
+| | |
+|---|---|
+| **What** | The chart follows a stated set of rules rather than taste. |
+| **Files** | `apps/web/components/StockChart.tsx` |
+| **Reversible** | `git` |
+
+| Rule | Why |
+|---|---|
+| **Price and volume never share a y-axis** | A dual-axis chart lets whoever picks the scales decide whether volume "confirms" a price move. Volume gets its own panel below, sharing the x-axis, so the reader draws that conclusion |
+| **One price series, so no legend** | The title names it; a legend box for a single line is noise |
+| **Crosshair and tooltip by default** | An SVG chart in a browser is an interactive surface |
+| **Reference lines labelled in text** | Legible without colour, and in print |
+| **Gaps stay gaps** | A bridged trading halt looks like trading that did not happen |
+| **Long ranges resample** | A browser cannot usefully draw 2,500 candles across 900 pixels; 10Y renders as 117 monthly bars |
+
+---
+
+#### C036 — Fixed: green and yellow are indistinguishable to colourblind readers
+
+| | |
+|---|---|
+| **What** | Every signal badge carries an icon and a text label. Colour is reinforcement only. |
+| **Why** | **Found by running the palette validator, not by eye.** Against this app's dark surface, `#3fb950` (buy) and `#e3b341` (hold) are **ΔE 3.8 apart under protanopia**. Red-green colour blindness affects roughly 8% of men. On a product where a green badge means buy and a red one means sell, a reader who cannot separate those hues is being shown a verdict they cannot read. |
+| **Files** | `apps/web/components/stock/pieces.tsx`, `apps/web/app/globals.css` |
+| **Reversible** | `git` |
+
+```
+$ node validate_palette.js "#3fb950,#e3b341,#f85149,#6e7681" --mode dark --surface "#0d1117"
+  [FAIL] CVD separation   worst adjacent #e3b341↔#3fb950 ΔE 3.8 (protan)
+  [PASS] Normal-vision floor   worst adjacent ΔE 19.0 (normal)
+```
+
+Full-colour readers separate them easily (ΔE 19.0), which is exactly why this never gets noticed by looking. Each badge now renders an icon plus the word — "Strong Buy", "Hold", "Avoid" — so the verdict survives both colour blindness and a greyscale print.
+
+The same principle elsewhere on the page: the risk score is labelled *"(lower is better)"* rather than relying on the reader to remember which direction is good; quote staleness is spelled out as *"updated 29 min ago"*; and bear/base/bull render as one hue at three depths, because they are ordinal steps of one quantity rather than three competing categories.
+
+---
+
+#### C037 — Fixed: the intrinsic value line was crushing the price chart
+
+| | |
+|---|---|
+| **What** | The price series owns the y-axis. Reference lines may stretch it only so far; beyond that they are pinned to the edge and flagged. |
+| **Why** | **Found by rendering the page and looking at it.** With the price at ₹280 and intrinsic value at ₹499.77, the reference line dragged the axis to ₹500 and the actual price history was crushed into the bottom fifth of the plot. The chart stopped showing the thing it exists to show — and this happens precisely on the deeply undervalued stocks a user most wants to examine. |
+| **Files** | `apps/web/components/StockChart.tsx` |
+| **Reversible** | `git` |
+
+A reference beyond the allowance now renders as `▲ Intrinsic value ₹499.77 — off this scale` pinned to the top edge. That is the honest representation: it says the value is off the top rather than silently rescaling everything around it.
+
+---
+
+#### C038 — Fixed: the sidebar left 170px of content on a phone
+
+| | |
+|---|---|
+| **What** | The sidebar collapses to an icon rail below 1024px. An explicit click still wins. |
+| **Why** | **Found by measuring the rendered page at phone width.** The sidebar was a fixed 220px at every viewport. On a 390px phone that left **170px** for the page — the price, the chart and the trade plan all wrapped to one or two characters a line. Most retail stock-app usage is on a phone. |
+| **Files** | `apps/web/components/Sidebar.tsx` |
+| **Verified** | Content width at 390px: **170px → 326px**; no horizontal overflow at 390, 768, 1024, 1280 or 1500px |
+| **Reversible** | `git` |
+
+---
+
+#### C039 — Fixed: "The stock is in a sideways with RSI at 7"
+
+| | |
+|---|---|
+| **What** | Trend labels supply their own noun. |
+| **Why** | `SIDEWAYS` was lower-cased into the sentence, producing *"in a sideways"*. Small, but it is the first sentence a user reads on the verdict card. |
+| **Files** | `apps/api/services/analytics/signals.py` — `_describe` |
+| **Verified** | Re-ran the signals stage: *"The stock is in a sideways range with RSI at 7."* |
+| **Reversible** | `git` |
+
+---
+
+#### C040 — Fixed: the project never type-checked
+
+| | |
+|---|---|
+| **What** | `StockRow` aligned with what the API returns; two formatters accept a null currency. |
+| **Why** | **Pre-existing, confirmed against the base commit.** `npm run type-check` failed with **11 errors** on `48a1698`, before any of my changes. `exchange`, `currency_symbol`, `change_pct` and `change_abs` were added to the endpoint when multi-exchange support landed but never declared in the interface. The page read them anyway, so multi-currency formatting silently fell back to rupees for every foreign listing. |
+| **Files** | `apps/web/app/page.tsx` |
+| **Verified** | **0 type errors**; `next build` succeeds, all 15 routes |
+| **Reversible** | `git` |
+
+The `(stock as any)` casts that the missing fields had forced are gone too — they were suppressing the very error that would have caught this.
+
+---

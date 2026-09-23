@@ -619,7 +619,15 @@ def _describe(
         )
 
     if tech is not None and tech.trend != "UNKNOWN":
-        readable = tech.trend.replace("_", " ").lower()
+        # "SIDEWAYS" reads as "in a sideways" without the noun, so the label
+        # supplies one. Small, but it is the sentence a user reads first.
+        readable = {
+            "STRONG_UPTREND": "strong uptrend",
+            "UPTREND": "uptrend",
+            "SIDEWAYS": "sideways range",
+            "DOWNTREND": "downtrend",
+            "STRONG_DOWNTREND": "strong downtrend",
+        }.get(tech.trend, tech.trend.replace("_", " ").lower())
         detail = f"The stock is in a {readable}"
         if tech.rsi_14 is not None:
             detail += f" with RSI at {tech.rsi_14:.0f}"

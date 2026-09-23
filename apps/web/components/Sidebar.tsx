@@ -6,7 +6,7 @@ import {
   Filter, Brain, Zap, ChevronLeft,
   ChevronRight, Layers, BarChart2, Shield, Cog,
 } from "lucide-react";
-import { useState, type ElementType } from "react";
+import { useEffect, useState, type ElementType } from "react";
 
 // BUG FIX: Was using Settings icon for BOTH /admin and /settings — now distinct icons
 // Admin → Shield, Settings → Cog
@@ -34,6 +34,31 @@ type NavItem = {
 export default function Sidebar() {
   const pathname = usePathname();
   const [collapsed, setCollapsed] = useState(false);
+  // Set once the viewport has been measured, so a narrow screen never renders
+  // the expanded rail first and reflows.
+  const [userOverrode, setUserOverrode] = useState(false);
+
+  /**
+   * Collapse to the icon rail on narrow screens.
+   *
+   * The sidebar was a fixed 220px at every width. On a 390px phone that left
+   * 170px for the page itself — the price, the chart and the trade plan all
+   * wrapped to one or two characters a line, which is not a usable stock page
+   * on the device most people would actually open it on.
+   *
+   * An explicit click still wins: once the user has toggled it themselves,
+   * resizing stops second-guessing them.
+   */
+  useEffect(() => {
+    if (typeof window === "undefined" || !window.matchMedia) return;
+    const query = window.matchMedia("(max-width: 1024px)");
+    const apply = () => {
+      if (!userOverrode) setCollapsed(query.matches);
+    };
+    apply();
+    query.addEventListener("change", apply);
+    return () => query.removeEventListener("change", apply);
+  }, [userOverrode]);
 
   return (
     <aside
@@ -139,7 +164,7 @@ export default function Sidebar() {
           </div>
         )}
         <button
-          onClick={() => setCollapsed((c) => !c)}
+          onClick={() => { setUserOverrode(true); setCollapsed((c) => !c); }}
           className="w-full flex items-center justify-center p-2 rounded-lg"
           style={{
             background: "transparent",

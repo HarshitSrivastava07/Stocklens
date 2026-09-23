@@ -389,6 +389,145 @@
       "flag": null,
       "commit": "79a062d",
       "tag": "change/C029"
+    },
+    {
+      "id": "C030",
+      "title": "Fix: the AI SDK could take the whole API down",
+      "files": [
+        "apps/api/routers/ai.py"
+      ],
+      "reversible": "git",
+      "risk": "API fails to boot wherever google-genai is absent; two AI endpoints crash at runtime.",
+      "flag": null,
+      "commit": "7e9c30c",
+      "tag": "change/C030"
+    },
+    {
+      "id": "C031",
+      "title": "Research API",
+      "files": [
+        "apps/api/routers/research.py",
+        "apps/api/main.py"
+      ],
+      "reversible": "git",
+      "risk": "The stock detail page loses its entire backend.",
+      "flag": null,
+      "commit": "7e9c30c",
+      "tag": "change/C031"
+    },
+    {
+      "id": "C032",
+      "title": "Fix: a stale stock would show an empty chart",
+      "files": [
+        "apps/api/routers/research.py"
+      ],
+      "reversible": "git",
+      "risk": "Stocks with stale data show empty charts; a bad future date breaks every range.",
+      "flag": null,
+      "commit": "7e9c30c",
+      "tag": "change/C032"
+    },
+    {
+      "id": "C033",
+      "title": "API verified end to end",
+      "files": [],
+      "reversible": "manual",
+      "manual_steps": [
+        "Nothing to revert; this was a verification step."
+      ],
+      "risk": "None.",
+      "flag": null,
+      "commit": "7e9c30c",
+      "tag": "change/C033"
+    },
+    {
+      "id": "C034",
+      "title": "Stock detail page rebuilt",
+      "commit": "f346f43",
+      "tag": "change/C034",
+      "files": [
+        "apps/web/app/stocks/[symbol]/page.tsx",
+        "apps/web/components/StockChart.tsx",
+        "apps/web/components/stock/pieces.tsx",
+        "apps/web/lib/api.ts",
+        "apps/web/app/globals.css"
+      ],
+      "reversible": "git",
+      "flag": null,
+      "risk": "Removes the chart, valuation workings, trade plan and research workspace."
+    },
+    {
+      "id": "C035",
+      "title": "Charts built to an explicit visual contract",
+      "commit": "f346f43",
+      "tag": "change/C035",
+      "files": [
+        "apps/web/components/StockChart.tsx"
+      ],
+      "reversible": "git",
+      "flag": null,
+      "risk": "Loses the price chart entirely."
+    },
+    {
+      "id": "C036",
+      "title": "Fix: green and yellow are indistinguishable to colourblind readers",
+      "commit": "f346f43",
+      "tag": "change/C036",
+      "files": [
+        "apps/web/components/stock/pieces.tsx",
+        "apps/web/app/globals.css"
+      ],
+      "reversible": "git",
+      "flag": null,
+      "risk": "Signal verdicts become unreadable to roughly 8% of male users. Do not revert."
+    },
+    {
+      "id": "C037",
+      "title": "Fix: the intrinsic value line was crushing the price chart",
+      "commit": "f346f43",
+      "tag": "change/C037",
+      "files": [
+        "apps/web/components/StockChart.tsx"
+      ],
+      "reversible": "git",
+      "flag": null,
+      "risk": "Deeply undervalued stocks show an unreadable price chart."
+    },
+    {
+      "id": "C038",
+      "title": "Fix: the sidebar left 170px of content on a phone",
+      "commit": "f346f43",
+      "tag": "change/C038",
+      "files": [
+        "apps/web/components/Sidebar.tsx"
+      ],
+      "reversible": "git",
+      "flag": null,
+      "risk": "The app becomes unusable on a phone."
+    },
+    {
+      "id": "C039",
+      "title": "Fix: a trend label rendered without its noun",
+      "commit": "f346f43",
+      "tag": "change/C039",
+      "files": [
+        "apps/api/services/analytics/signals.py"
+      ],
+      "reversible": "git",
+      "flag": null,
+      "risk": "Cosmetic wording regression."
+    },
+    {
+      "id": "C040",
+      "title": "Fix: the project never type-checked",
+      "commit": "f346f43",
+      "tag": "change/C040",
+      "files": [
+        "apps/web/app/page.tsx"
+      ],
+      "reversible": "git",
+      "flag": null,
+      "risk": "11 type errors return; multi-currency formatting silently reverts to rupees."
     }
   ]
 }

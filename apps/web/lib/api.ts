@@ -156,4 +156,50 @@ export const adminApi = {
     }),
 };
 
+// ── Research ─────────────────────────────────────────────────
+// Backs the stock detail page. Every response carries its own availability and
+// provenance, so the UI can say "not computed yet" instead of rendering an
+// empty card the user cannot interpret.
+export type ChartRange = "1M" | "3M" | "6M" | "YTD" | "1Y" | "3Y" | "5Y" | "10Y" | "MAX";
+
+export const researchApi = {
+  getOverview: (symbol: string) =>
+    fetchApi(`/api/v1/research/${symbol}/overview`),
+  getChart: (symbol: string, range: ChartRange = "1Y", adjusted = true) =>
+    fetchApi(
+      `/api/v1/research/${symbol}/chart?range=${range}&adjusted=${adjusted}`,
+    ),
+  getValuation: (symbol: string) =>
+    fetchApi(`/api/v1/research/${symbol}/valuation`),
+  getFundamentals: (symbol: string, periodType: "A" | "Q" = "A") =>
+    fetchApi(`/api/v1/research/${symbol}/fundamentals?period_type=${periodType}`),
+  getPeers: (symbol: string, limit = 8) =>
+    fetchApi(`/api/v1/research/${symbol}/peers?limit=${limit}`),
+  search: (q: string, limit = 12) =>
+    fetchApi(`/api/v1/research/search?q=${encodeURIComponent(q)}&limit=${limit}`),
+
+  // Research notes
+  listNotes: (symbol: string) => fetchApi(`/api/v1/research/${symbol}/notes`),
+  createNote: (
+    symbol: string,
+    note: {
+      body: string;
+      title?: string;
+      tags?: string[];
+      thesis_stance?: "BULLISH" | "BEARISH" | "NEUTRAL";
+    },
+  ) =>
+    fetchApi(`/api/v1/research/${symbol}/notes`, {
+      method: "POST",
+      body: JSON.stringify(note),
+    }),
+  updateNote: (symbol: string, noteId: string, patch: object) =>
+    fetchApi(`/api/v1/research/${symbol}/notes/${noteId}`, {
+      method: "PATCH",
+      body: JSON.stringify(patch),
+    }),
+  deleteNote: (symbol: string, noteId: string) =>
+    fetchApi(`/api/v1/research/${symbol}/notes/${noteId}`, { method: "DELETE" }),
+};
+
 export { ApiError };

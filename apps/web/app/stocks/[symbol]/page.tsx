@@ -1,578 +1,928 @@
 "use client";
 
+/**
+ * Stock detail page.
+ *
+ * Six tabs over one symbol: the chart and headline verdict, the valuation with
+ * its full workings, ten years of filings, the technical state, sector peers,
+ * and the user's own research notes.
+ *
+ * The page never invents a value. Where the backend reports a block as
+ * unavailable it renders the stated reason instead of an empty card, because
+ * "no valuation yet" and "valuation refused: three years of filings" are
+ * different facts and the second one is the one worth reading.
+ */
+
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import useSWR from "swr";
 import {
-  ArrowLeft, TrendingUp, TrendingDown, AlertTriangle,
-  RefreshCw, Brain, BarChart2, Cpu, Activity, Shield,
-  Info, ExternalLink,
+  ArrowLeft, BookOpen, Calculator, ExternalLink, Info, LineChart,
+  Loader2, Plus, RefreshCw, Trash2, Users,
 } from "lucide-react";
-import { useSymbolWebSocket } from "@/hooks/useWebSocket";
-import { useMarketStore } from "@/store/market";
-import { stocksApi, marketApi, aiApi } from "@/lib/api";
-import { useState } from "react";
-import PriceChart from "@/components/PriceChart";
+
+import { researchApi, type ChartRange } from "@/lib/api";
+import StockChart from "@/components/StockChart";
 import ErrorBoundary from "@/components/ErrorBoundary";
+import {
+  ActionBadge, ConfidencePill, NotAvailable, ScoreBar, StatTile,
+  ValuationBand, WarningList, fmtCompact, fmtMoney, fmtPct,
+} from "@/components/stock/pieces";
 
-
-const CURRENCY_SYMBOLS: Record<string, string> = {
-  INR: "₹",
-  USD: "$",
-  GBP: "£",
-  EUR: "€",
-  JPY: "¥",
-  HKD: "HK$",
-  AUD: "A$",
+const CURRENCY: Record<string, string> = {
+  INR: "₹", USD: "$", GBP: "£", EUR: "€", JPY: "¥", HKD: "HK$", AUD: "A$",
 };
 
-const fmt = {
-  price: (v: number | null, symbol = "₹") =>
-    v == null ? "—" : `${symbol}${v.toLocaleString(symbol === "₹" ? "en-IN" : "en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
-  pct: (v: number | null, mult = 1) =>
-    v == null ? "—" : `${(v * mult) >= 0 ? "+" : ""}${(v * mult).toFixed(1)}%`,
-  num: (v: number | null, dec = 2) => v == null ? "—" : v.toFixed(dec),
-  cr: (v: number | null, currency = "INR") => {
-    if (v == null) return "—";
-    const symbol = CURRENCY_SYMBOLS[currency] || "$";
-    const abs = Math.abs(v);
-    const sign = v < 0 ? "-" : "";
-    if (currency === "INR") {
-      if (abs >= 1e7) return `${sign}₹${(abs / 1e7).toFixed(1)}Cr`;
-      if (abs >= 1e5) return `${sign}₹${(abs / 1e5).toFixed(1)}L`;
-      return `${sign}₹${abs.toFixed(0)}`;
-    } else {
-      if (abs >= 1e9) return `${sign}${symbol}${(abs / 1e9).toFixed(1)}B`;
-      if (abs >= 1e6) return `${sign}${symbol}${(abs / 1e6).toFixed(1)}M`;
-      return `${sign}${symbol}${abs.toFixed(0)}`;
-    }
-  },
-};
+type Tab = "overview" | "valuation" | "financials" | "technicals" | "peers" | "notes";
 
-const signalConfig = {
-  GREEN: { bg: "rgba(63,185,80,0.1)", color: "#3fb950", border: "rgba(63,185,80,0.3)" },
-  YELLOW: { bg: "rgba(227,179,65,0.1)", color: "#e3b341", border: "rgba(227,179,65,0.3)" },
-  RED: { bg: "rgba(248,81,73,0.1)", color: "#f85149", border: "rgba(248,81,73,0.3)" },
-  GREY: { bg: "rgba(110,118,129,0.1)", color: "#6e7681", border: "rgba(110,118,129,0.3)" },
-};
+const TABS: { id: Tab; label: string; Icon: typeof LineChart }[] = [
+  { id: "overview", label: "Overview", Icon: LineChart },
+  { id: "valuation", label: "Valuation", Icon: Calculator },
+  { id: "financials", label: "Financials", Icon: BookOpen },
+  { id: "technicals", label: "Technicals", Icon: RefreshCw },
+  { id: "peers", label: "Peers", Icon: Users },
+  { id: "notes", label: "Research", Icon: BookOpen },
+];
 
-// ─── Small Components ─────────────────────────────────────────
-function MetricCard({ label, value, sub, color }: { label: string; value: string; sub?: string; color?: string }) {
-  return (
-    <div className="metric-card">
-      <div className="metric-label">{label}</div>
-      <div className="metric-value" style={color ? { color } : undefined}>{value}</div>
-      {sub && <div className="metric-sub">{sub}</div>}
-    </div>
+export default function StockDetailPage() {
+  const params = useParams();
+  const router = useRouter();
+  const symbol = String(params?.symbol ?? "").toUpperCase();
+
+  const [tab, setTab] = useState<Tab>("overview");
+  const [range, setRange] = useState<ChartRange>("1Y");
+
+  const { data: overview, error: overviewError, isLoading } = useSWR<any>(
+    symbol ? ["overview", symbol] : null,
+    () => researchApi.getOverview(symbol),
+    { refreshInterval: 60_000, revalidateOnFocus: true },
   );
-}
 
-function RatioRow({ label, value, highlight }: { label: string; value: string; highlight?: "good" | "bad" | "neutral" }) {
-  const color = highlight === "good" ? "#3fb950" : highlight === "bad" ? "#f85149" : "var(--text-secondary)";
-  return (
-    <div className="flex justify-between items-center py-2" style={{ borderBottom: "1px solid var(--bg-border)" }}>
-      <span style={{ color: "var(--text-muted)", fontSize: 12 }}>{label}</span>
-      <span className="font-mono text-sm font-semibold" style={{ color }}>{value}</span>
-    </div>
+  const { data: chart, isLoading: chartLoading } = useSWR<any>(
+    symbol ? ["chart", symbol, range] : null,
+    () => researchApi.getChart(symbol, range),
+    { keepPreviousData: true },
   );
-}
 
-function ScoreGauge({ score, label, color }: { score: number | null; label: string; color: string }) {
-  if (score == null) return null;
-  return (
-    <div className="flex flex-col items-center gap-2">
-      <div
-        className="w-16 h-16 rounded-full flex items-center justify-center font-bold text-xl"
-        style={{ background: `${color}20`, border: `2px solid ${color}`, color }}
-      >
-        {score}
-      </div>
-      <div className="text-xs text-center" style={{ color: "var(--text-muted)" }}>{label}</div>
-    </div>
-  );
-}
+  const currency = CURRENCY[overview?.stock?.currency ?? "INR"] ?? "₹";
+  const quote = overview?.quote;
+  const valuation = overview?.valuation;
+  const signal = overview?.signal;
 
-function RiskFlagBadge({ severity, description }: { severity: string; description: string }) {
-  const colors = { CRITICAL: "#f85149", HIGH: "#e3b341", MEDIUM: "#2188ff", LOW: "#6e7681" };
-  const c = colors[severity as keyof typeof colors] || "#6e7681";
-  return (
-    <div className="flex items-start gap-2 py-2" style={{ borderBottom: "1px solid var(--bg-border)" }}>
-      <span className="text-xs font-bold px-2 py-0.5 rounded mt-0.5" style={{ background: `${c}20`, color: c }}>
-        {severity}
-      </span>
-      <span style={{ color: "var(--text-secondary)", fontSize: 12 }}>{description}</span>
-    </div>
-  );
-}
-
-// ─── Valuation Visual ─────────────────────────────────────────
-function ValuationRange({ iv, cmp, currencySymbol = "₹" }: { iv: any; cmp: number | null; currencySymbol?: string }) {
-  if (!iv || !cmp) return null;
-  const bear = iv.iv_bear || 0;
-  const bull = iv.iv_bull || 0;
-  const range = bull - bear;
-  if (range <= 0) return null;
-
-  const cmpPct = Math.min(100, Math.max(0, ((cmp - bear) / range) * 100));
-  const basePct = ((iv.iv_base - bear) / range) * 100;
-
-  return (
-    <div className="mt-4">
-      <div className="flex justify-between text-xs mb-1" style={{ color: "var(--text-muted)" }}>
-        <span>Bear {currencySymbol}{bear?.toFixed(0)}</span>
-        <span>Base {currencySymbol}{iv.iv_base?.toFixed(0)}</span>
-        <span>Bull {currencySymbol}{bull?.toFixed(0)}</span>
-      </div>
-      <div className="relative h-3 rounded-full" style={{ background: "var(--bg-border)" }}>
-        {/* Bear to bull range */}
-        <div className="absolute inset-0 rounded-full" style={{ background: "linear-gradient(90deg, #f85149 0%, #e3b341 50%, #3fb950 100%)" }} />
-        {/* CMP marker */}
-        <div
-          className="absolute top-1/2 -translate-y-1/2 w-3 h-5 rounded"
-          style={{
-            left: `${cmpPct}%`,
-            background: "white",
-            boxShadow: "0 0 8px rgba(0,0,0,0.5)",
-            transform: "translate(-50%, -50%)",
-          }}
+  if (overviewError) {
+    return (
+      <div className="app-content">
+        <button className="btn btn-ghost" onClick={() => router.back()}>
+          <ArrowLeft className="w-4 h-4" /> Back
+        </button>
+        <NotAvailable
+          title={`Could not load ${symbol}`}
+          reason={String(overviewError?.message ?? overviewError)}
+          hint="Check that the symbol exists and the API is reachable."
         />
       </div>
-      <div className="flex justify-between text-xs mt-1" style={{ color: "var(--text-muted)" }}>
-        <span>Bear</span>
-        <span style={{ color: "#2188ff" }}>CMP: {fmt.price(cmp, currencySymbol)}</span>
-        <span>Bull</span>
+    );
+  }
+
+  return (
+    <ErrorBoundary>
+      <div className="app-content stock-page">
+        {/* ── Header ───────────────────────────────────────── */}
+        <div className="stock-header">
+          <button className="btn btn-ghost" onClick={() => router.back()}>
+            <ArrowLeft className="w-4 h-4" /> Back
+          </button>
+
+          <div className="stock-header-main">
+            <div>
+              <div className="stock-symbol-row">
+                <h1 className="stock-symbol">{symbol}</h1>
+                {signal?.available && <ActionBadge action={signal.action} size="lg" />}
+              </div>
+              <div className="stock-name">
+                {isLoading ? "Loading…" : overview?.stock?.name ?? "—"}
+                {overview?.stock?.sector && (
+                  <span className="stock-sector"> · {overview.stock.sector}</span>
+                )}
+                {overview?.stock?.exchange && (
+                  <span className="stock-sector"> · {overview.stock.exchange}</span>
+                )}
+              </div>
+            </div>
+
+            <div className="stock-price-block">
+              <div className="stock-price">{fmtMoney(quote?.price, currency)}</div>
+              <div
+                className={
+                  (quote?.change_pct ?? 0) >= 0 ? "price-up" : "price-down"
+                }
+              >
+                {fmtMoney(quote?.change_abs, currency)} ({fmtPct(quote?.change_pct)})
+              </div>
+              {/* Staleness is stated, not hidden: a price the reader cannot tell
+                  is two days old is more dangerous than a missing one. */}
+              {quote?.available && (
+                <div className={`quote-freshness${quote.is_stale ? " is-stale" : ""}`}>
+                  {quote.is_stale ? "Stale — " : ""}
+                  {quote.age_minutes != null
+                    ? `updated ${formatAge(quote.age_minutes)} ago`
+                    : "update time unknown"}
+                  {quote.source && ` · ${quote.source}`}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+
+        {/* ── Tabs ─────────────────────────────────────────── */}
+        <div className="tab-bar" role="tablist">
+          {TABS.map(({ id, label, Icon }) => (
+            <button
+              key={id}
+              role="tab"
+              aria-selected={tab === id}
+              className={`tab${tab === id ? " tab-active" : ""}`}
+              onClick={() => setTab(id)}
+            >
+              <Icon className="w-4 h-4" aria-hidden /> {label}
+            </button>
+          ))}
+        </div>
+
+        {tab === "overview" && (
+          <OverviewTab
+            symbol={symbol}
+            overview={overview}
+            chart={chart}
+            chartLoading={chartLoading}
+            range={range}
+            setRange={setRange}
+            currency={currency}
+            isLoading={isLoading}
+          />
+        )}
+        {tab === "valuation" && <ValuationTab symbol={symbol} currency={currency} />}
+        {tab === "financials" && <FinancialsTab symbol={symbol} currency={currency} />}
+        {tab === "technicals" && (
+          <TechnicalsTab tech={overview?.technicals} currency={currency} />
+        )}
+        {tab === "peers" && <PeersTab symbol={symbol} currency={currency} />}
+        {tab === "notes" && <NotesTab symbol={symbol} currency={currency} />}
+
+        <div className="disclaimer-banner">
+          <Info className="w-4 h-4" aria-hidden />
+          <span>
+            Research output, not investment advice. Every figure is derived from
+            reported filings and market data; assumptions are shown on the
+            Valuation tab so you can disagree with a specific number rather than
+            the conclusion.
+          </span>
+        </div>
       </div>
-    </div>
+    </ErrorBoundary>
   );
 }
 
-// ─── AI Summary Panel ─────────────────────────────────────────
-function AISummaryPanel({ symbol }: { symbol: string }) {
-  const { data, error, isLoading, mutate } = useSWR(
-    `ai-summary-${symbol}`,
-    () => aiApi.getSummary(symbol) as any
-  );
-  const [generating, setGenerating] = useState(false);
+function formatAge(minutes: number): string {
+  if (minutes < 1) return "seconds";
+  if (minutes < 60) return `${Math.round(minutes)} min`;
+  if (minutes < 1440) return `${(minutes / 60).toFixed(1)} h`;
+  return `${(minutes / 1440).toFixed(1)} days`;
+}
 
-  const handleGenerate = async () => {
-    setGenerating(true);
-    try {
-      await aiApi.generateSummary(symbol);
-      await mutate();
-    } catch (e: any) {
-      alert(e.message || "AI generation failed");
-    } finally {
-      setGenerating(false);
-    }
-  };
+// ─────────────────────────────────────────────────────────────
+// Overview
+// ─────────────────────────────────────────────────────────────
+function OverviewTab({
+  symbol, overview, chart, chartLoading, range, setRange, currency, isLoading,
+}: any) {
+  const quote = overview?.quote;
+  const valuation = overview?.valuation;
+  const signal = overview?.signal;
+  const tech = overview?.technicals;
+  const coverage = overview?.coverage;
 
   return (
-    <div className="card p-5">
-      <div className="flex items-center justify-between mb-4">
-        <div className="flex items-center gap-2">
-          <Brain className="w-4 h-4 text-blue-400" />
-          <span className="font-semibold text-sm" style={{ color: "var(--text-primary)" }}>AI Research Summary</span>
-        </div>
-        <button
-          className="btn btn-ghost text-xs"
-          onClick={handleGenerate}
-          disabled={generating}
-        >
-          {generating ? <RefreshCw className="w-3 h-3 animate-spin" /> : <RefreshCw className="w-3 h-3" />}
-          {generating ? "Generating..." : "Generate"}
-        </button>
-      </div>
+    <div className="tab-panel">
+      <StockChart
+        symbol={symbol}
+        candles={chart?.candles ?? []}
+        range={range}
+        onRangeChange={setRange}
+        currencySymbol={currency}
+        intrinsicValue={valuation?.available ? valuation.intrinsic_value : null}
+        entryLow={signal?.available ? signal.plan?.entry_low : null}
+        entryHigh={signal?.available ? signal.plan?.entry_high : null}
+        loading={chartLoading}
+        resampled={chart?.resampled}
+        sessionsAvailable={chart?.sessions_available}
+      />
 
-      {isLoading ? (
-        <div className="space-y-2">
-          <div className="skeleton h-4 w-full" />
-          <div className="skeleton h-4 w-4/5" />
-          <div className="skeleton h-4 w-3/4" />
-        </div>
-      ) : error ? (
-        <div className="text-red-400 text-sm">Failed to load AI summary</div>
-      ) : data?.content ? (
-        <div>
-          <div
-            className="text-sm leading-relaxed whitespace-pre-wrap"
-            style={{ color: "var(--text-secondary)" }}
-          >
-            {data.content}
+      {/* ── The verdict ─────────────────────────────────── */}
+      {signal?.available ? (
+        <div className="card verdict-card">
+          <div className="verdict-head">
+            <ActionBadge action={signal.action} size="lg" />
+            <div>
+              <div className="verdict-headline">{signal.headline}</div>
+              <div className="verdict-meta">
+                Conviction {(signal.conviction * 100).toFixed(0)}%
+                {valuation?.available && (
+                  <>
+                    {" · "}
+                    <ConfidencePill
+                      confidence={valuation.confidence}
+                      years={valuation.years_of_history}
+                    />
+                  </>
+                )}
+              </div>
+            </div>
           </div>
-          <div className="mt-4 disclaimer-banner text-xs">
-            {data.disclaimer}
+
+          <div className="verdict-body">
+            <div className="verdict-reasoning">
+              <h4>Why</h4>
+              <ul>
+                {(signal.rationale ?? []).map((r: string, i: number) => (
+                  <li key={i}>{r}</li>
+                ))}
+              </ul>
+
+              <h4>What would change this view</h4>
+              <ul className="invalidation-list">
+                {(signal.invalidation ?? []).map((r: string, i: number) => (
+                  <li key={i}>{r}</li>
+                ))}
+              </ul>
+
+              {!!signal.risk_flags?.length && (
+                <>
+                  <h4>Risk flags</h4>
+                  <ul className="risk-flag-list">
+                    {signal.risk_flags.map((r: string, i: number) => (
+                      <li key={i}>{r}</li>
+                    ))}
+                  </ul>
+                </>
+              )}
+            </div>
+
+            <div className="verdict-scores">
+              <h4>Scores</h4>
+              <ScoreBar label="Value" value={signal.scores?.value}
+                hint="How far below intrinsic value, scaled by how much the valuation can be trusted" />
+              <ScoreBar label="Quality" value={signal.scores?.quality}
+                hint="Returns on capital, margin stability, cash generation and leverage" />
+              <ScoreBar label="Momentum" value={signal.scores?.momentum}
+                hint="Trend and price action — a timing input only" />
+              <ScoreBar label="Risk" value={signal.scores?.risk} inverted
+                hint="Leverage, loss years, volatility and valuation fragility" />
+              <div className="composite-row">
+                <span>Composite</span>
+                <b>{signal.scores?.composite?.toFixed(0) ?? "—"}</b>
+              </div>
+            </div>
           </div>
-          <div className="mt-2 text-xs" style={{ color: "var(--text-muted)" }}>
-            Generated: {data.generated_at ? new Date(data.generated_at).toLocaleString() : "—"} · Model: {data.model_used}
-          </div>
+
+          {/* ── The trade plan, in prices ───────────────── */}
+          {signal.plan?.max_buy_price != null && (
+            <div className="trade-plan">
+              <h4>Plan</h4>
+              <div className="trade-plan-grid">
+                <StatTile label="Buy below" value={fmtMoney(signal.plan.max_buy_price, currency)}
+                  sub="Intrinsic value less the margin of safety" />
+                <StatTile label="Entry zone"
+                  value={`${fmtMoney(signal.plan.entry_low, currency)} – ${fmtMoney(signal.plan.entry_high, currency)}`} />
+                <StatTile label="Stop loss" value={fmtMoney(signal.plan.stop_loss, currency)}
+                  sub="2.5× ATR below price" />
+                <StatTile label="Target 1" value={fmtMoney(signal.plan.target_1, currency)} />
+                <StatTile label="Target 2" value={fmtMoney(signal.plan.target_2, currency)} />
+                <StatTile label="Risk / reward"
+                  value={signal.plan.risk_reward != null ? `${signal.plan.risk_reward.toFixed(2)}×` : "—"} />
+                <StatTile label="Position size"
+                  value={signal.plan.position_size_pct != null ? `${signal.plan.position_size_pct.toFixed(1)}%` : "—"}
+                  sub="Of portfolio" />
+                <StatTile label="Horizon" value={signal.plan.horizon || "—"} />
+              </div>
+            </div>
+          )}
         </div>
       ) : (
-        <div className="text-center py-6" style={{ color: "var(--text-muted)" }}>
-          <Brain className="w-8 h-8 mx-auto mb-2 opacity-30" />
-          <p className="text-sm">No AI summary yet.</p>
-          <p className="text-xs mt-1">Click "Generate" to create one using Gemini.</p>
+        <NotAvailable
+          title="No signal yet"
+          reason={signal?.reason}
+          hint="Signals are produced once a valuation and a technical snapshot exist for this stock."
+        />
+      )}
+
+      {/* ── Valuation summary ───────────────────────────── */}
+      {valuation?.available ? (
+        <div className="card">
+          <div className="card-head">
+            <h3>Intrinsic value</h3>
+            <ConfidencePill confidence={valuation.confidence} years={valuation.years_of_history} />
+          </div>
+
+          <div className="iv-summary">
+            <div className="iv-hero">
+              <div className="iv-hero-value">
+                {fmtMoney(valuation.intrinsic_value, currency)}
+              </div>
+              <div
+                className={
+                  (valuation.upside_pct ?? 0) >= 0 ? "price-up" : "price-down"
+                }
+              >
+                {fmtPct(valuation.upside_pct)} vs price
+              </div>
+              <div className="iv-hero-sub">
+                {valuation.primary_model?.replace(/_/g, " ")} ·{" "}
+                margin of safety {fmtPct(valuation.margin_of_safety, 1, false)}
+              </div>
+            </div>
+            <ValuationBand
+              bear={valuation.bear} base={valuation.base} bull={valuation.bull}
+              price={quote?.price} currency={currency}
+            />
+          </div>
+
+          <WarningList warnings={valuation.warnings} />
+        </div>
+      ) : (
+        <NotAvailable
+          title="No valuation"
+          reason={valuation?.reason}
+          hint="The engine refuses to publish a value it cannot defend from the filings."
+        />
+      )}
+
+      {/* ── Key numbers ─────────────────────────────────── */}
+      <div className="stat-grid">
+        <StatTile label="Market cap" value={fmtCompact(quote?.market_cap, currency)} />
+        <StatTile label="Day range"
+          value={`${fmtMoney(quote?.low, currency)} – ${fmtMoney(quote?.high, currency)}`} />
+        <StatTile label="52-week range"
+          value={`${fmtMoney(quote?.week_52_low, currency)} – ${fmtMoney(quote?.week_52_high, currency)}`} />
+        <StatTile label="Volume" value={fmtCompact(quote?.volume)} />
+        <StatTile label="Trend" value={(tech?.trend ?? "—").replace(/_/g, " ")} />
+        <StatTile label="RSI (14)" value={tech?.rsi_14?.toFixed(1) ?? "—"}
+          sub={tech?.rsi_14 == null ? undefined : tech.rsi_14 > 70 ? "Overbought" : tech.rsi_14 < 30 ? "Oversold" : "Neutral"} />
+        <StatTile label="1-year return" value={fmtPct(tech?.return_1y, 1, false)} />
+        <StatTile label="Filings stored" value={`${coverage?.annual_filings ?? 0} years`}
+          sub={coverage?.has_full_decade ? "Full decade" : "Less than 10 years"} />
+      </div>
+
+      {overview?.stock?.summary && (
+        <div className="card">
+          <div className="card-head"><h3>About</h3></div>
+          <p className="business-summary">{overview.stock.summary}</p>
+          {overview.stock.website && (
+            <a className="btn btn-ghost" href={overview.stock.website}
+               target="_blank" rel="noopener noreferrer">
+              Company website <ExternalLink className="w-3 h-3" />
+            </a>
+          )}
         </div>
       )}
     </div>
   );
 }
 
-// ─── Main Page ────────────────────────────────────────────────
-export default function StockDetailPage() {
-  const params = useParams();
-  const router = useRouter();
-  const symbol = (params.symbol as string).toUpperCase();
-
-  // WebSocket for live price
-  useSymbolWebSocket(symbol);
-  const liveQuote = useMarketStore((s) => s.quotes[symbol]);
-
-  const { data: stock, isLoading } = useSWR(
-    `stock-${symbol}`,
-    () => stocksApi.getDetail(symbol) as any,
-    { refreshInterval: 30_000 }
+// ─────────────────────────────────────────────────────────────
+// Valuation — the full workings
+// ─────────────────────────────────────────────────────────────
+function ValuationTab({ symbol, currency }: { symbol: string; currency: string }) {
+  const { data, error, isLoading } = useSWR<any>(
+    ["valuation", symbol],
+    () => researchApi.getValuation(symbol),
   );
-  const { data: ratiosData } = useSWR(
-    `ratios-${symbol}`,
-    () => stocksApi.getRatios(symbol) as any
-  );
-  const { data: financialsData } = useSWR(
-    `fins-${symbol}`,
-    () => stocksApi.getFinancials(symbol) as any
-  );
-  const { data: candleData } = useSWR(
-    `candles-${symbol}`,
-    () => marketApi.getCandles(symbol, "1D", 365) as any,
-    { revalidateOnFocus: false }
-  );
-  const candles = (candleData?.candles || []).map((c: any) => ({
-    time: Math.floor(new Date(c.timestamp || c.time).getTime() / 1000),
-    open: c.open, high: c.high, low: c.low, close: c.close, volume: c.volume,
-  }));
 
-
-  const cmp = liveQuote?.ltp ?? stock?.quote?.ltp ?? null;
-  const changePct = liveQuote?.change_pct ?? stock?.quote?.change_pct ?? null;
-
-  if (isLoading) {
+  if (isLoading) return <div className="skeleton" style={{ height: 320 }} />;
+  if (error)
     return (
-      <div className="min-h-screen p-8" style={{ background: "var(--bg-base)" }}>
-        <div className="skeleton h-8 w-48 mb-4" />
-        <div className="skeleton h-32 w-full mb-4" />
-        <div className="skeleton h-64 w-full" />
-      </div>
+      <NotAvailable
+        title="No valuation stored"
+        reason={String(error?.message ?? error)}
+        hint="Run the valuation stage of the pipeline for this symbol."
+      />
     );
-  }
 
-  if (!stock) {
-    return (
-      <div className="min-h-screen flex items-center justify-center" style={{ background: "var(--bg-base)" }}>
-        <div className="text-center">
-          <div className="text-2xl mb-2" style={{ color: "var(--text-muted)" }}>Stock not found</div>
-          <button className="btn btn-primary" onClick={() => router.back()}>Go Back</button>
-        </div>
-      </div>
-    );
-  }
-
-  const sig = stock.signal;
-  const iv = stock.intrinsic_value;
-  const ml = stock.ml_scores;
-  const ratios = ratiosData;
-  const sigColor = (sig?.signal_color || "GREY") as keyof typeof signalConfig;
-  const sigStyle = signalConfig[sigColor];
+  const s = data?.summary;
+  const coc = s?.cost_of_capital;
+  const hist = data?.history_profile ?? {};
+  const rdcf = data?.reverse_dcf ?? {};
+  const base = data?.assumptions?.BASE;
 
   return (
-    <div className="min-h-screen" style={{ background: "var(--bg-base)" }}>
-      {/* Topbar */}
-      <div className="topbar">
-        <button className="btn btn-ghost" onClick={() => router.back()}>
-          <ArrowLeft className="w-4 h-4" /> Dashboard
-        </button>
-        <span style={{ color: "var(--text-muted)" }}>›</span>
-        <span className="font-bold" style={{ color: "var(--text-primary)" }}>{symbol}</span>
-        <div className="flex-1" />
-        {liveQuote && (
-          <span className="text-xs text-green-400 flex items-center gap-1">
-            <span className="live-dot" /> LIVE
-          </span>
-        )}
+    <div className="tab-panel">
+      {/* Every assumption, on the page, so a reader can disagree with one
+          number rather than with the conclusion. */}
+      <div className="card">
+        <div className="card-head">
+          <h3>How this number was produced</h3>
+          <ConfidencePill confidence={s?.confidence} years={s?.years_of_history} />
+        </div>
+        <p className="card-intro">
+          Every assumption below is measured from this company's own reported
+          history — not a market-wide default. The only inputs that are not are
+          the risk-free rate and equity risk premium, which are market-wide by
+          definition and shown with the cost of capital.
+        </p>
+
+        <div className="assumption-grid">
+          <StatTile label="Revenue growth (year 1)" value={fmtPct(base?.growth_initial, 1, false)}
+            sub="From the measured revenue CAGR" />
+          <StatTile label="Terminal growth" value={fmtPct(base?.growth_terminal, 1, false)}
+            sub="Capped at the risk-free rate" />
+          <StatTile label="Operating margin" value={fmtPct(base?.operating_margin, 1, false)}
+            sub="Median reported, with the measured trend" />
+          <StatTile label="Tax rate" value={fmtPct(base?.tax_rate, 1, false)}
+            sub="Median effective rate actually paid" />
+          <StatTile label="Sales to capital" value={base?.sales_to_capital?.toFixed(2) ?? "—"}
+            sub="Revenue per unit of invested capital" />
+          <StatTile label="Terminal ROIC" value={fmtPct(base?.terminal_roic, 1, false)}
+            sub="Its own ROIC, capped as competition arrives" />
+        </div>
       </div>
 
-      <div className="main-content max-w-7xl mx-auto">
-        {/* ── Header ── */}
-        <div className="flex flex-col md:flex-row md:items-start gap-6 mb-6">
-          <div className="flex-1">
-            <div className="flex items-center gap-3 mb-1">
-              <h1 className="text-2xl font-bold" style={{ color: "var(--text-primary)" }}>
-                {stock.company_name}
-              </h1>
-              <span className="text-lg font-mono" style={{ color: "var(--text-muted)" }}>
-                {symbol}
-              </span>
-            </div>
-            <div className="flex flex-wrap items-center gap-2 text-xs" style={{ color: "var(--text-muted)" }}>
-              {stock.sector?.sector && <span>{stock.sector.sector}</span>}
-              {stock.sector?.industry && <><span>›</span><span>{stock.sector.industry}</span></>}
-              {stock.is_nifty50 && (
-                <span className="px-2 py-0.5 rounded" style={{ background: "rgba(33,136,255,0.1)", color: "#2188ff" }}>
-                  NIFTY50
-                </span>
-              )}
-              {stock.is_fno && (
-                <span className="px-2 py-0.5 rounded" style={{ background: "rgba(227,179,65,0.1)", color: "#e3b341" }}>
-                  F&O
-                </span>
-              )}
-            </div>
-          </div>
+      <div className="card">
+        <div className="card-head"><h3>Cost of capital</h3></div>
+        <div className="assumption-grid">
+          <StatTile label="WACC" value={fmtPct(coc?.wacc, 2, false)} />
+          <StatTile label="Cost of equity" value={fmtPct(coc?.cost_of_equity, 2, false)} />
+          <StatTile label="Cost of debt" value={fmtPct(coc?.cost_of_debt, 2, false)}
+            sub="Interest actually paid ÷ average debt" />
+          <StatTile label="Beta" value={coc?.beta?.toFixed(2) ?? "—"}
+            sub={coc?.beta_source === "regressed"
+              ? "Regressed from real price history"
+              : "Default — not enough overlapping history"} />
+        </div>
+      </div>
 
-          {/* Price & Signal */}
-          <div className="flex items-center gap-6">
-            <div className="text-right">
-              <div className="text-3xl font-bold font-mono" style={{ color: "var(--text-primary)" }}>
-                {fmt.price(cmp, stock.currency_symbol)}
-              </div>
-              {changePct != null && (
-                <div className={`text-sm font-mono font-semibold ${changePct >= 0 ? "price-up" : "price-down"}`}>
-                  {changePct >= 0 ? "▲" : "▼"} {Math.abs(changePct).toFixed(2)}%
-                </div>
-              )}
+      {/* ── The measured history the assumptions came from ── */}
+      <div className="card">
+        <div className="card-head"><h3>What the company actually did</h3></div>
+        <div className="assumption-grid">
+          <StatTile label="Revenue CAGR" value={fmtPct(hist.revenue_cagr, 1, false)}
+            sub={`over ${hist.years ?? "—"} years`} />
+          <StatTile label="Operating margin (median)" value={fmtPct(hist.operating_margin_median, 1, false)} />
+          <StatTile label="ROIC (median)" value={fmtPct(hist.roic_median, 1, false)} />
+          <StatTile label="Effective tax rate" value={fmtPct(hist.effective_tax_rate, 1, false)} />
+          <StatTile label="Profitable years" value={`${hist.profitable_years ?? "—"} / ${hist.years ?? "—"}`} />
+          <StatTile label="FCF-positive years" value={`${hist.fcf_positive_years ?? "—"} / ${hist.years ?? "—"}`} />
+          <StatTile label="Net debt" value={fmtCompact(hist.net_debt, currency)} />
+          <StatTile label="Share count change" value={fmtPct(hist.share_count_cagr, 2, false)}
+            sub="Positive means dilution" />
+        </div>
+      </div>
+
+      {/* ── Reverse DCF: what the price already assumes ───── */}
+      {rdcf?.interpretation && (
+        <div className="card reverse-dcf">
+          <div className="card-head"><h3>What today's price already assumes</h3></div>
+          <p className="reverse-dcf-text">{rdcf.interpretation}</p>
+          {rdcf.implied_growth_rate != null && (
+            <div className="assumption-grid">
+              <StatTile label="Growth the price implies"
+                value={fmtPct(rdcf.implied_growth_rate, 1, false)} />
+              <StatTile label="Growth actually delivered"
+                value={fmtPct(rdcf.historical_growth_rate, 1, false)} />
             </div>
-            {sig && (
-              <div
-                className="px-4 py-3 rounded-lg text-center"
-                style={{ background: sigStyle.bg, border: `1px solid ${sigStyle.border}` }}
-              >
-                <div className="text-xs font-semibold uppercase tracking-widest" style={{ color: sigStyle.color }}>
-                  {sig.signal_label}
-                </div>
-                {iv?.upside_pct != null && (
-                  <div className="text-lg font-bold font-mono mt-1" style={{ color: sigStyle.color }}>
-                    {iv.upside_pct >= 0 ? "+" : ""}{iv.upside_pct.toFixed(1)}%
-                  </div>
-                )}
-                <div className="text-xs mt-1" style={{ color: "var(--text-muted)" }}>upside</div>
-              </div>
+          )}
+        </div>
+      )}
+
+      {/* ── Each model's independent answer ───────────────── */}
+      <div className="card">
+        <div className="card-head"><h3>Models</h3></div>
+        <table className="data-table">
+          <thead>
+            <tr><th>Model</th><th className="num">Value per share</th><th className="num">Weight</th><th>What it does</th></tr>
+          </thead>
+          <tbody>
+            {(data?.models ?? []).map((m: any) => (
+              <tr key={m.model}>
+                <td><b>{m.model.replace(/_/g, " ")}</b></td>
+                <td className="num">{fmtMoney(m.value_per_share, currency)}</td>
+                <td className="num">{(m.weight * 100).toFixed(0)}%</td>
+                <td className="muted">{m.note}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      {/* ── The projection, year by year ──────────────────── */}
+      {!!data?.projection?.length && (
+        <div className="card">
+          <div className="card-head">
+            <h3>Ten-year projection</h3>
+            {s?.terminal_value_share != null && (
+              <span className="muted-note">
+                {(s.terminal_value_share * 100).toFixed(0)}% of value sits in the
+                terminal assumption
+              </span>
             )}
+          </div>
+          <div className="table-scroll">
+            <table className="data-table">
+              <thead>
+                <tr>
+                  <th>Year</th><th className="num">Growth</th><th className="num">Revenue</th>
+                  <th className="num">EBIT</th><th className="num">NOPAT</th>
+                  <th className="num">Reinvestment</th><th className="num">FCFF</th>
+                  <th className="num">Present value</th>
+                </tr>
+              </thead>
+              <tbody>
+                {data.projection.map((p: any) => (
+                  <tr key={p.year}>
+                    <td>{p.year}</td>
+                    <td className="num">{fmtPct(p.growth, 1, false)}</td>
+                    <td className="num">{fmtCompact(p.revenue, currency)}</td>
+                    <td className="num">{fmtCompact(p.ebit, currency)}</td>
+                    <td className="num">{fmtCompact(p.nopat, currency)}</td>
+                    <td className="num">{fmtCompact(p.reinvestment, currency)}</td>
+                    <td className="num">{fmtCompact(p.fcff, currency)}</td>
+                    <td className="num">{fmtCompact(p.present_value, currency)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
         </div>
+      )}
 
-        {/* ── Main Grid ── */}
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          {/* Left column */}
-          <div className="lg:col-span-2 space-y-6">
+      <WarningList warnings={data?.warnings} />
+    </div>
+  );
+}
 
-            {/* Price Chart */}
-            <div className="card p-5">
-              <div className="flex items-center gap-2 mb-4">
-                <BarChart2 className="w-4 h-4 text-blue-400" />
-                <span className="font-semibold text-sm" style={{ color: "var(--text-primary)" }}>
-                  Price History — {symbol}
-                </span>
-              </div>
-              <ErrorBoundary fallback="Chart unavailable">
-                <PriceChart symbol={symbol} candles={candles} height={340} />
-              </ErrorBoundary>
-            </div>
+// ─────────────────────────────────────────────────────────────
+// Financials
+// ─────────────────────────────────────────────────────────────
+function FinancialsTab({ symbol, currency }: { symbol: string; currency: string }) {
+  const [periodType, setPeriodType] = useState<"A" | "Q">("A");
+  const { data, isLoading } = useSWR<any>(
+    ["fundamentals", symbol, periodType],
+    () => researchApi.getFundamentals(symbol, periodType),
+    { keepPreviousData: true },
+  );
 
-            {/* Signal explanation */}
-            {sig && (
-              <div className="card p-5">
-                <div className="flex items-center gap-2 mb-3">
-                  <Activity className="w-4 h-4 text-blue-400" />
-                  <span className="font-semibold text-sm" style={{ color: "var(--text-primary)" }}>Signal Analysis</span>
-                </div>
-                <div className="text-sm mb-3" style={{ color: "var(--text-secondary)" }}>
-                  <strong style={{ color: sigStyle.color }}>{sig.signal_label}:</strong>{" "}
-                  {sig.main_reason || "No reason computed yet"}
-                </div>
-                {sig.conditions && (
-                  <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
-                    {Object.entries(sig.conditions).map(([k, v]) => (
-                      <div key={k} className="flex items-center gap-2 text-xs">
-                        <span style={{ color: v ? "#3fb950" : "#f85149" }}>{v ? "✓" : "✗"}</span>
-                        <span style={{ color: "var(--text-muted)" }}>{k.replace(/_/g, " ")}</span>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            )}
+  if (isLoading) return <div className="skeleton" style={{ height: 320 }} />;
 
-            {/* Valuation */}
-            {iv && (
-              <div className="card p-5">
-                <div className="flex items-center gap-2 mb-4">
-                  <BarChart2 className="w-4 h-4 text-blue-400" />
-                  <span className="font-semibold text-sm" style={{ color: "var(--text-primary)" }}>
-                    Intrinsic Value — {iv.primary_model}
-                  </span>
-                  {iv.valuation_confidence && (
-                    <span
-                      className="text-xs font-bold px-2 py-0.5 rounded ml-auto"
-                      style={{
-                        background: iv.valuation_confidence === "HIGH" ? "rgba(63,185,80,0.1)" : iv.valuation_confidence === "MEDIUM" ? "rgba(227,179,65,0.1)" : "rgba(248,81,73,0.1)",
-                        color: iv.valuation_confidence === "HIGH" ? "#3fb950" : iv.valuation_confidence === "MEDIUM" ? "#e3b341" : "#f85149",
-                      }}
-                    >
-                      {iv.valuation_confidence} CONFIDENCE
-                    </span>
-                  )}
-                </div>
-                <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
-                  <MetricCard label="Bear Case" value={fmt.price(iv.iv_bear, stock.currency_symbol)} sub="conservative" color="#f85149" />
-                  <MetricCard label="Base Case" value={fmt.price(iv.iv_base, stock.currency_symbol)} sub="expected" color="#e3b341" />
-                  <MetricCard label="Bull Case" value={fmt.price(iv.iv_bull, stock.currency_symbol)} sub="optimistic" color="#3fb950" />
-                  <MetricCard label="Blended IV" value={fmt.price(iv.iv_blended, stock.currency_symbol)} sub="25/50/25 weighted" color="#2188ff" />
-                </div>
-                <ValuationRange iv={iv} cmp={cmp} currencySymbol={stock.currency_symbol} />
-                <div className="mt-4 grid grid-cols-2 gap-4">
-                  <MetricCard
-                    label="Upside / Downside"
-                    value={iv.upside_pct != null ? `${iv.upside_pct >= 0 ? "+" : ""}${iv.upside_pct.toFixed(1)}%` : "—"}
-                    color={iv.upside_pct != null ? (iv.upside_pct >= 25 ? "#3fb950" : iv.upside_pct >= 0 ? "#e3b341" : "#f85149") : undefined}
-                  />
-                  <MetricCard
-                    label="Margin of Safety"
-                    value={iv.margin_of_safety != null ? `${(iv.margin_of_safety * 100).toFixed(1)}%` : "—"}
-                    color={iv.margin_of_safety != null ? (iv.margin_of_safety >= 0.15 ? "#3fb950" : "#e3b341") : undefined}
-                  />
-                </div>
-                <div className="disclaimer-banner mt-4 text-xs">
-                  ⚠️ Intrinsic value is based on model assumptions. Not a guarantee. CMP and valuations change daily.
-                </div>
-              </div>
-            )}
+  const periods: any[] = data?.periods ?? [];
+  if (!periods.length) {
+    return (
+      <NotAvailable
+        title="No filings stored"
+        reason={data?.message}
+        hint="Run the fundamentals stage of the pipeline for this symbol."
+      />
+    );
+  }
 
-            {/* Ratios grid */}
-            {ratios && (
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                {/* Valuation ratios */}
-                <div className="card p-5">
-                  <h3 className="font-semibold text-sm mb-4" style={{ color: "var(--text-primary)" }}>Valuation</h3>
-                  <RatioRow label="P/E (TTM)" value={fmt.num(ratios.valuation?.pe)} highlight={ratios.valuation?.pe != null && ratios.valuation.pe < 15 ? "good" : ratios.valuation?.pe > 40 ? "bad" : "neutral"} />
-                  <RatioRow label="P/B" value={fmt.num(ratios.valuation?.pb)} highlight={ratios.valuation?.pb != null && ratios.valuation.pb < 2 ? "good" : ratios.valuation?.pb > 8 ? "bad" : "neutral"} />
-                  <RatioRow label="EV/EBITDA" value={fmt.num(ratios.valuation?.ev_ebitda)} />
-                  <RatioRow label="P/S" value={fmt.num(ratios.valuation?.ps)} />
-                  <RatioRow label="PEG" value={fmt.num(ratios.valuation?.peg)} highlight={ratios.valuation?.peg != null && ratios.valuation.peg < 1 ? "good" : "neutral"} />
-                </div>
+  const rows: { key: string; label: string; fmt: (v: any) => string }[] = [
+    { key: "revenue", label: "Revenue", fmt: (v) => fmtCompact(v, currency) },
+    { key: "revenue_growth", label: "Revenue growth", fmt: (v) => fmtPct(v, 1, false) },
+    { key: "ebitda", label: "EBITDA", fmt: (v) => fmtCompact(v, currency) },
+    { key: "ebit", label: "Operating profit", fmt: (v) => fmtCompact(v, currency) },
+    { key: "operating_margin", label: "Operating margin", fmt: (v) => fmtPct(v, 1, false) },
+    { key: "pat", label: "Net profit", fmt: (v) => fmtCompact(v, currency) },
+    { key: "net_margin", label: "Net margin", fmt: (v) => fmtPct(v, 1, false) },
+    { key: "eps", label: "EPS", fmt: (v) => fmtMoney(v, currency) },
+    { key: "cfo", label: "Operating cash flow", fmt: (v) => fmtCompact(v, currency) },
+    { key: "capex", label: "Capex", fmt: (v) => fmtCompact(v, currency) },
+    { key: "free_cash_flow", label: "Free cash flow", fmt: (v) => fmtCompact(v, currency) },
+    { key: "net_worth", label: "Equity", fmt: (v) => fmtCompact(v, currency) },
+    { key: "total_debt", label: "Total debt", fmt: (v) => fmtCompact(v, currency) },
+    { key: "cash", label: "Cash", fmt: (v) => fmtCompact(v, currency) },
+    { key: "shares_outstanding", label: "Shares outstanding", fmt: (v) => fmtCompact(v) },
+  ];
 
-                {/* Profitability */}
-                <div className="card p-5">
-                  <h3 className="font-semibold text-sm mb-4" style={{ color: "var(--text-primary)" }}>Profitability</h3>
-                  <RatioRow label="ROE" value={fmt.pct(ratios.profitability?.roe, 100)} highlight={ratios.profitability?.roe != null && ratios.profitability.roe > 0.15 ? "good" : "neutral"} />
-                  <RatioRow label="ROCE" value={fmt.pct(ratios.profitability?.roce, 100)} highlight={ratios.profitability?.roce != null && ratios.profitability.roce > 0.15 ? "good" : "neutral"} />
-                  <RatioRow label="Net Margin" value={fmt.pct(ratios.profitability?.net_margin, 100)} />
-                  <RatioRow label="EBITDA Margin" value={fmt.pct(ratios.profitability?.ebitda_margin, 100)} />
-                  <RatioRow label="Operating Margin" value={fmt.pct(ratios.profitability?.operating_margin, 100)} />
-                </div>
+  return (
+    <div className="tab-panel">
+      <div className="card">
+        <div className="card-head">
+          <h3>
+            Reported filings
+            <span className="muted-note"> · {periods.length} periods</span>
+          </h3>
+          <div className="chart-ranges">
+            <button className={`chart-range-btn${periodType === "A" ? " is-active" : ""}`}
+              onClick={() => setPeriodType("A")}>Annual</button>
+            <button className={`chart-range-btn${periodType === "Q" ? " is-active" : ""}`}
+              onClick={() => setPeriodType("Q")}>Quarterly</button>
+          </div>
+        </div>
+        <p className="card-intro">
+          As reported by the source. A period that did not report a line shows a
+          dash — never a zero, which would silently drag every average toward it.
+          Margins and growth are computed on read, so they cannot drift out of
+          step with the filings above them.
+        </p>
 
-                {/* Growth */}
-                <div className="card p-5">
-                  <h3 className="font-semibold text-sm mb-4" style={{ color: "var(--text-primary)" }}>Growth</h3>
-                  <RatioRow label="Revenue CAGR 3Y" value={fmt.pct(ratios.growth?.revenue_cagr_3y, 100)} highlight={ratios.growth?.revenue_cagr_3y != null && ratios.growth.revenue_cagr_3y > 0.1 ? "good" : ratios.growth?.revenue_cagr_3y < 0 ? "bad" : "neutral"} />
-                  <RatioRow label="PAT CAGR 3Y" value={fmt.pct(ratios.growth?.pat_cagr_3y, 100)} highlight={ratios.growth?.pat_cagr_3y != null && ratios.growth.pat_cagr_3y > 0.1 ? "good" : ratios.growth?.pat_cagr_3y < 0 ? "bad" : "neutral"} />
-                  <RatioRow label="EPS CAGR 3Y" value={fmt.pct(ratios.growth?.eps_cagr_3y, 100)} />
-                  <RatioRow label="Revenue 1Y" value={fmt.pct(ratios.growth?.revenue_growth_1y, 100)} />
-                  <RatioRow label="Margin Expansion 3Y" value={ratios.growth?.margin_expansion_3y != null ? `${(ratios.growth.margin_expansion_3y * 100).toFixed(1)}pp` : "—"} />
-                </div>
+        <div className="table-scroll">
+          <table className="data-table financials-table">
+            <thead>
+              <tr>
+                <th className="sticky-col">Metric</th>
+                {periods.map((p) => (
+                  <th key={p.period_end} className="num">
+                    {new Date(p.period_end).toLocaleDateString("en-GB", {
+                      month: "short", year: "numeric",
+                    })}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((row) => (
+                <tr key={row.key}>
+                  <td className="sticky-col">{row.label}</td>
+                  {periods.map((p) => (
+                    <td key={p.period_end} className="num">
+                      {p[row.key] == null ? "—" : row.fmt(p[row.key])}
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  );
+}
 
-                {/* Leverage */}
-                <div className="card p-5">
-                  <h3 className="font-semibold text-sm mb-4" style={{ color: "var(--text-primary)" }}>Leverage & Liquidity</h3>
-                  <RatioRow label="Debt/Equity" value={fmt.num(ratios.leverage?.debt_equity)} highlight={ratios.leverage?.debt_equity != null && ratios.leverage.debt_equity < 0.5 ? "good" : ratios.leverage?.debt_equity > 2 ? "bad" : "neutral"} />
-                  <RatioRow label="Debt/EBITDA" value={fmt.num(ratios.leverage?.debt_ebitda)} highlight={ratios.leverage?.debt_ebitda != null && ratios.leverage.debt_ebitda < 2 ? "good" : ratios.leverage?.debt_ebitda > 4 ? "bad" : "neutral"} />
-                  <RatioRow label="Interest Coverage" value={fmt.num(ratios.leverage?.interest_coverage, 1)} highlight={ratios.leverage?.interest_coverage != null && ratios.leverage.interest_coverage > 5 ? "good" : ratios.leverage?.interest_coverage < 2 ? "bad" : "neutral"} />
-                  <RatioRow label="CFO/PAT" value={fmt.num(ratios.efficiency?.cfo_pat)} highlight={ratios.efficiency?.cfo_pat != null && ratios.efficiency.cfo_pat > 0.9 ? "good" : ratios.efficiency?.cfo_pat < 0.5 ? "bad" : "neutral"} />
-                  <RatioRow label="FCF Margin" value={fmt.pct(ratios.efficiency?.fcf_margin, 100)} />
-                </div>
-              </div>
-            )}
+// ─────────────────────────────────────────────────────────────
+// Technicals
+// ─────────────────────────────────────────────────────────────
+function TechnicalsTab({ tech, currency }: { tech: any; currency: string }) {
+  if (!tech?.available) {
+    return (
+      <NotAvailable
+        title="No technical snapshot"
+        reason={tech?.reason}
+        hint="Technicals are computed from stored price history."
+      />
+    );
+  }
 
-            {/* Risk Flags */}
-            {stock.risk_flags?.length > 0 && (
-              <div className="card p-5">
-                <div className="flex items-center gap-2 mb-4">
-                  <AlertTriangle className="w-4 h-4 text-yellow-400" />
-                  <span className="font-semibold text-sm" style={{ color: "var(--text-primary)" }}>
-                    Risk Flags ({stock.risk_flags.length})
-                  </span>
-                </div>
-                {stock.risk_flags.map((f: any, i: number) => (
-                  <RiskFlagBadge key={i} severity={f.severity} description={f.description || f.flag_type} />
+  return (
+    <div className="tab-panel">
+      {/* An indicator with too little history shows a dash, never a shorter
+          window silently relabelled — a 50-day average presented as a 200-day
+          one is a lie on a chart somebody trades from. */}
+      {!!tech.warnings?.length && <WarningList warnings={tech.warnings} />}
+
+      <div className="card">
+        <div className="card-head">
+          <h3>Trend</h3>
+          <span className="muted-note">{tech.candles_used} sessions used</span>
+        </div>
+        <div className="stat-grid">
+          <StatTile label="Trend" value={(tech.trend ?? "—").replace(/_/g, " ")} />
+          <StatTile label="20-day average" value={fmtMoney(tech.sma_20, currency)} />
+          <StatTile label="50-day average" value={fmtMoney(tech.sma_50, currency)} />
+          <StatTile label="200-day average" value={fmtMoney(tech.sma_200, currency)}
+            sub={tech.sma_200 == null ? "Not enough history" : undefined} />
+        </div>
+      </div>
+
+      <div className="card">
+        <div className="card-head"><h3>Momentum</h3></div>
+        <div className="stat-grid">
+          <StatTile label="RSI (14)" value={tech.rsi_14?.toFixed(1) ?? "—"}
+            sub={tech.rsi_14 == null ? undefined
+              : tech.rsi_14 > 70 ? "Overbought" : tech.rsi_14 < 30 ? "Oversold" : "Neutral"} />
+          <StatTile label="MACD" value={tech.macd_line?.toFixed(3) ?? "—"}
+            sub={tech.macd_histogram == null ? undefined
+              : tech.macd_histogram > 0 ? "Above signal" : "Below signal"} />
+          <StatTile label="Bollinger %B" value={tech.bollinger_percent_b?.toFixed(2) ?? "—"}
+            sub="0 = lower band, 1 = upper band" />
+          <StatTile label="ATR (14)" value={fmtMoney(tech.atr_14, currency)}
+            sub={tech.atr_pct != null ? `${(tech.atr_pct * 100).toFixed(1)}% of price` : undefined} />
+        </div>
+      </div>
+
+      <div className="card">
+        <div className="card-head"><h3>Returns and risk</h3></div>
+        <div className="stat-grid">
+          <StatTile label="1 month" value={fmtPct(tech.return_1m, 1, false)} />
+          <StatTile label="3 months" value={fmtPct(tech.return_3m, 1, false)} />
+          <StatTile label="6 months" value={fmtPct(tech.return_6m, 1, false)} />
+          <StatTile label="1 year" value={fmtPct(tech.return_1y, 1, false)} />
+          <StatTile label="3-year CAGR" value={fmtPct(tech.return_3y_cagr, 1, false)} />
+          <StatTile label="5-year CAGR" value={fmtPct(tech.return_5y_cagr, 1, false)} />
+          <StatTile label="Volatility (1y)" value={fmtPct(tech.volatility_1y, 1, false)}
+            sub="Annualised" />
+          <StatTile label="Worst drawdown" value={fmtPct(tech.max_drawdown_5y, 1, false)}
+            sub="Peak to trough, 5 years" />
+          <StatTile label="Beta" value={tech.beta?.toFixed(2) ?? "—"}
+            sub="Against the benchmark index" />
+          <StatTile label="From 52-week high" value={fmtPct(tech.pct_from_52w_high, 1, false)} />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────
+// Peers
+// ─────────────────────────────────────────────────────────────
+function PeersTab({ symbol, currency }: { symbol: string; currency: string }) {
+  const router = useRouter();
+  const { data, isLoading } = useSWR<any>(["peers", symbol], () => researchApi.getPeers(symbol));
+
+  if (isLoading) return <div className="skeleton" style={{ height: 280 }} />;
+  if (!data?.peers?.length) {
+    return <NotAvailable title="No peers found" reason={data?.message} />;
+  }
+
+  return (
+    <div className="tab-panel">
+      <div className="card">
+        <div className="card-head">
+          <h3>Sector peers</h3>
+          <span className="muted-note">{data.sector}</span>
+        </div>
+        <div className="table-scroll">
+          <table className="data-table">
+            <thead>
+              <tr>
+                <th>Symbol</th><th>Company</th><th className="num">Price</th>
+                <th className="num">Day</th><th className="num">Intrinsic value</th>
+                <th className="num">Upside</th><th>Confidence</th>
+                <th className="num">History</th><th>Signal</th>
+              </tr>
+            </thead>
+            <tbody>
+              {data.peers.map((p: any) => (
+                <tr key={p.symbol} className="clickable-row"
+                    onClick={() => router.push(`/stocks/${p.symbol}`)}>
+                  <td><b>{p.symbol}</b></td>
+                  <td className="muted">{p.name}</td>
+                  <td className="num">{fmtMoney(p.price, currency)}</td>
+                  <td className={`num ${(p.change_pct ?? 0) >= 0 ? "price-up" : "price-down"}`}>
+                    {fmtPct(p.change_pct)}
+                  </td>
+                  <td className="num">{fmtMoney(p.intrinsic_value, currency)}</td>
+                  <td className={`num ${(p.upside_pct ?? 0) >= 0 ? "price-up" : "price-down"}`}>
+                    {fmtPct(p.upside_pct)}
+                  </td>
+                  <td>{p.confidence ?? "—"}</td>
+                  <td className="num">{p.years_of_history ? `${p.years_of_history}y` : "—"}</td>
+                  <td><ActionBadge action={p.action} size="sm" /></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────
+// Research notes
+// ─────────────────────────────────────────────────────────────
+function NotesTab({ symbol, currency }: { symbol: string; currency: string }) {
+  const { data, isLoading, mutate } = useSWR<any>(
+    ["notes", symbol],
+    () => researchApi.listNotes(symbol),
+  );
+
+  const [open, setOpen] = useState(false);
+  const [title, setTitle] = useState("");
+  const [body, setBody] = useState("");
+  const [tags, setTags] = useState("");
+  const [stance, setStance] = useState<"BULLISH" | "BEARISH" | "NEUTRAL">("NEUTRAL");
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  const save = useCallback(async () => {
+    if (!body.trim()) return;
+    setSaving(true);
+    setErr(null);
+    try {
+      await researchApi.createNote(symbol, {
+        body: body.trim(),
+        title: title.trim() || undefined,
+        tags: tags.split(",").map((t) => t.trim()).filter(Boolean),
+        thesis_stance: stance,
+      });
+      setTitle(""); setBody(""); setTags(""); setStance("NEUTRAL"); setOpen(false);
+      await mutate();
+    } catch (e: any) {
+      setErr(e?.message ?? "Could not save the note.");
+    } finally {
+      setSaving(false);
+    }
+  }, [symbol, title, body, tags, stance, mutate]);
+
+  const remove = useCallback(
+    async (id: string) => {
+      await researchApi.deleteNote(symbol, id);
+      await mutate();
+    },
+    [symbol, mutate],
+  );
+
+  return (
+    <div className="tab-panel">
+      <div className="card">
+        <div className="card-head">
+          <h3>Research notes</h3>
+          <button className="btn btn-primary" onClick={() => setOpen((v) => !v)}>
+            <Plus className="w-4 h-4" aria-hidden /> New note
+          </button>
+        </div>
+        <p className="card-intro">
+          Each note records the price and intrinsic value at the moment you wrote
+          it, and those two figures are never editable. That is the point: a
+          thesis reviewed a year from now should be read against what you
+          actually knew when you formed it.
+        </p>
+
+        {open && (
+          <div className="note-editor">
+            <input className="input" placeholder="Title (optional)"
+              value={title} onChange={(e) => setTitle(e.target.value)} />
+            <textarea className="input note-textarea" rows={6}
+              placeholder="What is the thesis? What would prove it wrong?"
+              value={body} onChange={(e) => setBody(e.target.value)} />
+            <input className="input" placeholder="Tags, comma separated"
+              value={tags} onChange={(e) => setTags(e.target.value)} />
+            <div className="note-editor-row">
+              <div className="stance-picker" role="radiogroup" aria-label="Thesis stance">
+                {(["BULLISH", "NEUTRAL", "BEARISH"] as const).map((s) => (
+                  <button key={s} role="radio" aria-checked={stance === s}
+                    className={`chart-range-btn${stance === s ? " is-active" : ""}`}
+                    onClick={() => setStance(s)}>
+                    {s.charAt(0) + s.slice(1).toLowerCase()}
+                  </button>
                 ))}
               </div>
-            )}
+              <button className="btn btn-primary" onClick={save} disabled={saving || !body.trim()}>
+                {saving ? <Loader2 className="w-4 h-4 animate-spin" aria-hidden /> : null}
+                Save note
+              </button>
+            </div>
+            {err && <div className="note-error">{err}</div>}
           </div>
+        )}
 
-          {/* Right column */}
-          <div className="space-y-6">
-            {/* ML Scores */}
-            {ml && (
-              <div className="card p-5">
-                <div className="flex items-center gap-2 mb-4">
-                  <Cpu className="w-4 h-4 text-blue-400" />
-                  <span className="font-semibold text-sm" style={{ color: "var(--text-primary)" }}>ML Scores</span>
-                </div>
-                <div className="flex justify-around mb-4">
-                  <ScoreGauge score={ml.fundamental_score} label="Fundamental" color="#2188ff" />
-                  <ScoreGauge score={ml.growth_outlook_score} label="Growth" color="#3fb950" />
-                  <ScoreGauge score={ml.risk_score} label="Risk" color={ml.risk_score <= 30 ? "#3fb950" : ml.risk_score <= 60 ? "#e3b341" : "#f85149"} />
-                </div>
-                <div className="text-center text-xs mt-2" style={{ color: "var(--text-muted)" }}>
-                  Confidence: <strong style={{ color: ml.valuation_confidence === "HIGH" ? "#3fb950" : ml.valuation_confidence === "MEDIUM" ? "#e3b341" : "#f85149" }}>{ml.valuation_confidence || "—"}</strong>
-                </div>
-                {ml.risk_drivers?.length > 0 && (
-                  <div className="mt-3">
-                    <div className="text-xs font-semibold mb-2" style={{ color: "var(--text-muted)" }}>RISK DRIVERS</div>
-                    {ml.risk_drivers.slice(0, 3).map((d: string, i: number) => (
-                      <div key={i} className="text-xs py-1" style={{ color: "#e3b341" }}>⚠ {d}</div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            )}
-
-            {/* Live quote details */}
-            {(stock.quote || liveQuote) && (
-              <div className="card p-5">
-                <div className="flex items-center gap-2 mb-4">
-                  <Activity className="w-4 h-4 text-green-400" />
-                  <span className="font-semibold text-sm" style={{ color: "var(--text-primary)" }}>Market Data</span>
-                </div>
-                {(() => {
-                  const q = liveQuote || stock.quote;
-                  return (
-                    <>
-                      <RatioRow label="Open" value={fmt.price(q.open, stock.currency_symbol)} />
-                      <RatioRow label="High" value={fmt.price(q.high, stock.currency_symbol)} />
-                      <RatioRow label="Low" value={fmt.price(q.low, stock.currency_symbol)} />
-                      <RatioRow label="Prev Close" value={fmt.price(q.close, stock.currency_symbol)} />
-                      <RatioRow label="Volume" value={q.volume?.toLocaleString(stock.currency === "INR" ? "en-IN" : "en-US") || "—"} />
-                      <RatioRow label="52W High" value={fmt.price(q.week_52_high, stock.currency_symbol)} />
-                      <RatioRow label="52W Low" value={fmt.price(q.week_52_low, stock.currency_symbol)} />
-                      {q.last_updated && (
-                        <div className="text-xs mt-2" style={{ color: "var(--text-muted)" }}>
-                          Updated: {new Date(q.last_updated).toLocaleTimeString()}
-                        </div>
+        {isLoading ? (
+          <div className="skeleton" style={{ height: 120 }} />
+        ) : !data?.notes?.length ? (
+          <NotAvailable title="No notes yet"
+            reason={`Nothing recorded for ${symbol}.`}
+            hint="Write down the thesis while you still remember why you believed it." />
+        ) : (
+          <div className="note-list">
+            {data.notes.map((n: any) => (
+              <article key={n.id} className="note-card">
+                <header className="note-card-head">
+                  <div>
+                    {n.title && <h4 className="note-card-title">{n.title}</h4>}
+                    <div className="note-card-meta">
+                      {new Date(n.created_at).toLocaleDateString("en-GB", {
+                        day: "2-digit", month: "short", year: "numeric",
+                      })}
+                      {n.thesis_stance && (
+                        <span className={`stance-tag stance-${n.thesis_stance.toLowerCase()}`}>
+                          {n.thesis_stance}
+                        </span>
                       )}
-                    </>
-                  );
-                })()}
-              </div>
-            )}
+                    </div>
+                  </div>
+                  <button className="btn btn-ghost icon-only"
+                    aria-label="Delete note" onClick={() => remove(n.id)}>
+                    <Trash2 className="w-4 h-4" aria-hidden />
+                  </button>
+                </header>
 
-            {/* AI Summary */}
-            <AISummaryPanel symbol={symbol} />
+                <p className="note-card-body">{n.body}</p>
+
+                <footer className="note-card-foot">
+                  <span>
+                    At the time: price {fmtMoney(n.price_at_note, currency)}
+                    {n.iv_at_note != null && <> · intrinsic value {fmtMoney(n.iv_at_note, currency)}</>}
+                  </span>
+                  {!!n.tags?.length && (
+                    <span className="note-tags">
+                      {n.tags.map((t: string) => (
+                        <span key={t} className="badge">{t}</span>
+                      ))}
+                    </span>
+                  )}
+                </footer>
+              </article>
+            ))}
           </div>
-        </div>
-
-        {/* Disclaimer */}
-        <div className="disclaimer-banner mt-8">
-          ⚠️ <strong>Research Tool Only.</strong> All data, scores, and AI summaries are for personal research purposes.
-          This is not investment advice. Intrinsic value calculations rely on model assumptions and historical data.
-          Always verify independently before making financial decisions.
-        </div>
+        )}
       </div>
     </div>
   );
