@@ -35,6 +35,71 @@ Change IDs are sequential (`C001`, `C002`, …) and never reused.
 
 ---
 
+## Reversing changes
+
+Every change has an ID (`C001`, `C002`, …). Anything can be undone, either by
+reverting its commit or — for the engines — by switching it off at runtime.
+
+```bash
+python scripts/revert_change.py list              # everything that can be undone
+python scripts/revert_change.py show C012         # what it touched, and the risk
+python scripts/revert_change.py revert C012 --dry-run   # rehearse it
+python scripts/revert_change.py revert C012       # do it
+python scripts/revert_change.py verify            # registry vs git vs this file
+```
+
+**Nothing rewrites history.** A revert is a new commit undoing an old one, so
+the record stays intact and the revert can itself be reverted. The tool refuses
+to run against a dirty working tree unless you pass `--allow-dirty`, so your own
+uncommitted work is never at risk.
+
+**Two ways to undo a change:**
+
+| Method | What it does | When to use it |
+|---|---|---|
+| `git` | Reverts the commit | Permanent removal |
+| `flag` | Sets an environment variable to `false` | A bad overnight run you need to contain **now**, without a redeploy |
+
+The flags live in `apps/api/config.py` and are read from your `.env`:
+
+| Flag | Switches off |
+|---|---|
+| `ENGINE_VALUATION_ENABLED` | The 10-year intrinsic value engine |
+| `ENGINE_TECHNICALS_ENABLED` | Indicator snapshots |
+| `ENGINE_SIGNALS_ENABLED` | Buy/sell decisions |
+| `ENGINE_REVERSE_DCF_ENABLED` | The implied-growth solve |
+| `INGEST_HISTORY_ENABLED` | Daily OHLCV backfill |
+| `INGEST_FUNDAMENTALS_ENABLED` | Filing ingestion |
+| `INGEST_QUOTES_ENABLED` | Live price polling |
+
+A flag set to `false` makes that stage a no-op and leaves whatever was last
+written in place. It is a containment switch, not a data deletion.
+
+**Two files track this, and they are kept in step:**
+
+- `CLAUDE_CHANGES.md` — this file, the narrative: what changed and why.
+- `CHANGES_REGISTRY.json` — the machine-readable index the tool reads.
+
+`revert_change.py verify` cross-checks them against git and fails if a change
+is recorded in one place but not the other.
+
+### One honest limitation
+
+Changes **C003 – C015** were all committed together in `2f890cb` before this
+reversal system existed. They are individually *documented* and individually
+*described* by the tool, but they share a commit — so `revert C006` reverts all
+of them, not just C006. The dry run says so plainly before it does anything.
+
+Two of them, C006 and C010 and C011, can still be switched off individually
+via their runtime flags, which is usually what you actually want.
+
+**From C016 onward, each change gets its own commit and its own tag,** so each
+one reverts independently. If you want C003–C015 split retroactively, say so —
+it means rewriting that one commit on this branch, which is safe while the
+branch is unmerged.
+
+---
+
 ## Session 1 — 2026-09-21
 
 ### 0. Environment findings and constraints
@@ -455,5 +520,94 @@ Breakdown:
 | `test_signals.py` | 36 | direction, gating, trade-plan coherence, explanations |
 
 Three bugs were found by these tests and fixed before any of this shipped: C008, C012 and C014.
+
+---
+#### C016 — Change reversal system
+
+| | |
+|---|---|
+| **What** | A machine-readable change registry, a revert tool, git tags per change, and runtime feature flags. |
+| **Why** | You asked to be able to reverse any change. Documentation alone tells you what happened; this lets you undo it. |
+| **Files** | `CHANGES_REGISTRY.json` *(added)*, `scripts/revert_change.py` *(added)*, `apps/api/config.py` *(modified)*, `CLAUDE_CHANGES.md` *(modified)* |
+| **Verified** | All four subcommands exercised: `list`, `show C008`, `revert C006 --dry-run`, and the flag-only path |
+| **Reversible** | `git` — though reverting this removes the ability to revert other things |
+
+Three mechanisms, because they suit different moments:
+
+1. **Git revert per change.** `revert_change.py revert C0xx` creates a new commit undoing that change. History is never rewritten, so the revert itself can be reverted.
+2. **Runtime flags.** Seven `ENGINE_*` / `INGEST_*` settings in `apps/api/config.py`. Setting one to `false` in `.env` makes that stage a no-op on the next restart — no code change, no redeploy. This is the switch to reach for when a bad overnight run needs containing immediately.
+3. **Git tags.** `change/C001` … point at the commit for each change, so `git show change/C008` works without consulting the registry.
+
+The tool refuses to run against a dirty working tree unless you pass `--allow-dirty`, so it can never eat uncommitted work. `verify` cross-checks the registry against git and against this document, and fails if they have drifted apart.
+
+The known limitation — C003–C015 sharing one commit — is recorded above under *Reversing changes* rather than left for you to discover.
+
+---
+
+#### C017 — Migration 003: storage for the real engines
+
+| | |
+|---|---|
+| **What** | Schema for everything the rebuilt engines produce, plus a research workspace and operator-configurable market assumptions. |
+| **Why** | The new engines produce far more than the old schema could hold: a full projection, every assumption, the cost-of-capital breakdown, and an actionable trade plan. Without this they had nowhere to be stored and nothing to be audited against. |
+| **Files** | `supabase/migrations/003_real_engines.sql` *(added, 220 lines)* |
+| **Verified** | Applied against a live PostgreSQL 16 instance — see C019 |
+| **Reversible** | `git`. The migration is additive only: it adds columns and tables, drops nothing. Reverting removes the file, but a database already migrated keeps its columns harmlessly. |
+
+What it adds:
+
+| Object | Purpose |
+|---|---|
+| `price_candles_daily.adj_close` | **Split-adjusted close, stored separately from raw close** |
+| `intrinsic_values.*` (14 columns) | WACC, beta, assumptions, the full 10-year projection, models, warnings, reverse DCF |
+| `signals.*` (18 columns) | Action, conviction, entry zone, max buy price, stop, targets, risk/reward, position size, rationale |
+| `technical_snapshots` | New table — every indicator per stock |
+| `ingest_runs` | New table — what each job fetched, what failed and why |
+| `research_notes` | New table — the per-stock research workspace |
+| `market_assumptions` | New table — risk-free rate and equity risk premium per country |
+| `financial_results.*` (6 columns) | `depreciation`, `interest_expense`, `invested_capital`, `working_capital` |
+
+**On `adj_close` specifically.** Raw close is what the stock actually traded at and is what a chart must display. Adjusted close is corrected for splits and dividends and is the only correct input to a return or a beta calculation. The original schema had one `close` column for both jobs. Conflating them puts a fabricated 50% crash on the chart of every stock that has ever split — and quietly corrupts every return computed across the split date.
+
+**On `market_assumptions`.** Risk-free rate and equity risk premium are genuinely market-wide, not company-specific, so they are the one input the engine cannot derive from a company's filings. They live in a table so a desk can set its own house view, and every valuation records the values it used.
+
+---
+
+#### C018 — Ingestion and computation pipeline
+
+| | |
+|---|---|
+| **What** | `ingest_service.py` — moves real data from the provider into the database, then runs the engines over it. |
+| **Why** | The engines existed but nothing connected them to real data or to storage. |
+| **Files** | `apps/api/services/ingest_service.py` *(added, 1,100 lines)* |
+| **Verified** | End-to-end against live PostgreSQL — see C019 |
+| **Reversible** | `both` — `INGEST_*` and `ENGINE_*` flags disable individual stages |
+
+Six stages, in dependency order:
+
+```
+ provider ──> price_candles_daily ──┐
+          └─> financial_results ────┤
+          └─> realtime_quotes ──────┤
+                                    v
+                        technical_snapshots  (regresses beta)
+                                    |
+                                    v
+                          intrinsic_values   (uses that beta)
+                                    |
+                                    v
+                               signals
+```
+
+**The order is not arbitrary.** Technicals must run before valuation, because valuation reads the beta that the technical stage regresses from real price history. Signals run last because they read both.
+
+Decisions worth recording:
+
+- **A stock with no `yahoo_ticker` is skipped, never guessed at.** A wrong ticker silently fills one company's page with another company's prices — a failure that looks entirely normal on screen.
+- **Only columns the provider actually populated are written.** A partial refresh cannot blank a field that an earlier, richer source filled in.
+- **Missing years stay missing.** Never interpolated, never carried forward. A fabricated filing is indistinguishable from a real one once stored, and would silently drive a valuation.
+- **Upside is recomputed against the live price** when a signal is generated, not reused from the stored valuation row — so a signal reflects the price now, not the price at the last overnight job.
+- **Every stage writes an `ingest_runs` row** with counts and the first 50 errors, so a failed overnight job can be diagnosed from the database without re-running it.
+- **One symbol's failure never aborts the run.** Errors are recorded per symbol and the batch continues.
 
 ---

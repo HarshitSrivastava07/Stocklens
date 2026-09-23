@@ -76,6 +76,36 @@ class Settings(BaseSettings):
     AI_RATE_LIMIT_PER_MIN: int = 10
     VALUATION_RATE_LIMIT_PER_MIN: int = 5
 
+    # ── Feature flags ─────────────────────────────────────────
+    # Every engine added on top of the original codebase can be switched off
+    # here without touching code or reverting a commit. A flag set to false
+    # makes the corresponding stage a no-op and leaves whatever the previous
+    # implementation wrote in place, so a bad overnight run can be contained
+    # from the environment rather than from a redeploy.
+    #
+    # scripts/revert_change.py names the flag for any change that has one.
+    ENGINE_TECHNICALS_ENABLED: bool = True    # indicator snapshots
+    ENGINE_VALUATION_ENABLED: bool = True     # 10-year intrinsic value
+    ENGINE_SIGNALS_ENABLED: bool = True       # buy/sell decisions
+    ENGINE_REVERSE_DCF_ENABLED: bool = True   # implied-growth solve
+
+    INGEST_HISTORY_ENABLED: bool = True       # daily OHLCV backfill
+    INGEST_FUNDAMENTALS_ENABLED: bool = True  # annual/quarterly filings
+    INGEST_QUOTES_ENABLED: bool = True        # live price polling
+
+    # Years of price history to retain and request.
+    HISTORY_YEARS: int = 10
+    # Years of filings to request. Asking wider than needed costs nothing and
+    # the provider returns only what it actually has.
+    FUNDAMENTALS_YEARS: int = 12
+    # Minimum annual filings before a valuation will be published at all.
+    VALUATION_MIN_YEARS: int = 4
+
+    # Outbound request budget for the data provider, per second.
+    PROVIDER_RATE_PER_SEC: float = 5.0
+    PROVIDER_BURST: int = 10
+    PROVIDER_CONCURRENCY: int = 6
+
     # ── Data ──────────────────────────────────────────────────
     # NSE stale data threshold (minutes)
     PRICE_STALE_THRESHOLD_MIN: int = 5

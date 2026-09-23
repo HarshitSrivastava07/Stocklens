@@ -1,0 +1,246 @@
+{
+  "$comment": [
+    "Machine-readable index of every change made to this repository.",
+    "Read by scripts/revert_change.py, which uses it to show, verify and undo",
+    "any individual change. Kept in step with CLAUDE_CHANGES.md by hand:",
+    "the Markdown file is the narrative, this file is the index.",
+    "",
+    "Each entry:",
+    "  id          - stable change identifier, never reused",
+    "  title       - one line",
+    "  commit      - the commit that introduced it ('' until committed)",
+    "  tag         - git tag pointing at that commit",
+    "  files       - paths added or modified",
+    "  reversible  - how it can be undone:",
+    "                  'git'   - revert the commit",
+    "                  'flag'  - switch it off at runtime, no code change",
+    "                  'both'  - either works",
+    "  flag        - the setting name when reversible by flag",
+    "  risk        - what breaks if this is reverted"
+  ],
+  "changes": [
+    {
+      "id": "C001",
+      "title": "Working branch created from main",
+      "commit": "",
+      "tag": "",
+      "files": [],
+      "reversible": "git",
+      "flag": null,
+      "risk": "Nothing; branch ref only."
+    },
+    {
+      "id": "C002",
+      "title": "CLAUDE_CHANGES.md running changelog",
+      "commit": "",
+      "tag": "",
+      "files": [
+        "CLAUDE_CHANGES.md"
+      ],
+      "reversible": "git",
+      "flag": null,
+      "risk": "Loses the written record of every change."
+    },
+    {
+      "id": "C003",
+      "title": "Provider foundation layer",
+      "commit": "2f890cb",
+      "tag": "change/C003",
+      "files": [
+        "apps/api/services/providers/__init__.py",
+        "apps/api/services/providers/base.py"
+      ],
+      "reversible": "git",
+      "flag": null,
+      "risk": "Removes typed errors, rate limiting and retry; every provider and engine depends on this."
+    },
+    {
+      "id": "C004",
+      "title": "Real Yahoo Finance provider",
+      "commit": "2f890cb",
+      "tag": "change/C004",
+      "files": [
+        "apps/api/services/providers/yahoo.py"
+      ],
+      "reversible": "git",
+      "flag": null,
+      "risk": "Removes the only source of price history and fundamentals."
+    },
+    {
+      "id": "C005",
+      "title": "Financial time-series statistics",
+      "commit": "2f890cb",
+      "tag": "change/C005",
+      "files": [
+        "apps/api/services/analytics/timeseries.py"
+      ],
+      "reversible": "git",
+      "flag": null,
+      "risk": "Valuation and technicals both import this."
+    },
+    {
+      "id": "C006",
+      "title": "Intrinsic value engine rebuilt on ten years of filings",
+      "commit": "2f890cb",
+      "tag": "change/C006",
+      "files": [
+        "apps/api/services/analytics/intrinsic_value.py"
+      ],
+      "reversible": "both",
+      "flag": "ENGINE_VALUATION_ENABLED",
+      "risk": "Reverts to the previous one-year, hardcoded-growth valuation."
+    },
+    {
+      "id": "C007",
+      "title": "Confidence scoring tied to real history depth",
+      "commit": "2f890cb",
+      "tag": "change/C007",
+      "files": [
+        "apps/api/services/analytics/intrinsic_value.py"
+      ],
+      "reversible": "git",
+      "flag": null,
+      "risk": "Valuations lose their published confidence and warnings."
+    },
+    {
+      "id": "C008",
+      "title": "Fix: quoted price was contaminating intrinsic value",
+      "commit": "2f890cb",
+      "tag": "change/C008",
+      "files": [
+        "apps/api/services/analytics/intrinsic_value.py"
+      ],
+      "reversible": "git",
+      "flag": null,
+      "risk": "Intrinsic value becomes a function of the price it is meant to judge. Not recommended."
+    },
+    {
+      "id": "C009",
+      "title": "Test suite: known-answer DCF",
+      "commit": "2f890cb",
+      "tag": "change/C009",
+      "files": [
+        "tests/conftest.py",
+        "tests/fixtures/companies.py",
+        "tests/test_intrinsic_value.py",
+        "pytest.ini"
+      ],
+      "reversible": "git",
+      "flag": null,
+      "risk": "Removes the proof that the DCF arithmetic is correct."
+    },
+    {
+      "id": "C010",
+      "title": "Technical indicators from real candles",
+      "commit": "2f890cb",
+      "tag": "change/C010",
+      "files": [
+        "apps/api/services/analytics/technicals.py"
+      ],
+      "reversible": "both",
+      "flag": "ENGINE_TECHNICALS_ENABLED",
+      "risk": "Signals lose their timing input and beta becomes a default."
+    },
+    {
+      "id": "C011",
+      "title": "Buy / sell decision engine",
+      "commit": "2f890cb",
+      "tag": "change/C011",
+      "files": [
+        "apps/api/services/analytics/signals.py"
+      ],
+      "reversible": "both",
+      "flag": "ENGINE_SIGNALS_ENABLED",
+      "risk": "Reverts to the previous colour-only signal with no trade plan."
+    },
+    {
+      "id": "C012",
+      "title": "Fix: valuation direction stated backwards in the rationale",
+      "commit": "2f890cb",
+      "tag": "change/C012",
+      "files": [
+        "apps/api/services/analytics/signals.py"
+      ],
+      "reversible": "git",
+      "flag": null,
+      "risk": "Every signal would again tell users the opposite of the truth. Do not revert."
+    },
+    {
+      "id": "C013",
+      "title": "Fix: entry zone stretched from current price up to fair value",
+      "commit": "2f890cb",
+      "tag": "change/C013",
+      "files": [
+        "apps/api/services/analytics/signals.py"
+      ],
+      "reversible": "git",
+      "flag": null,
+      "risk": "Entry zones would again permit buying at a fraction of the assumed margin of safety."
+    },
+    {
+      "id": "C014",
+      "title": "Fix: distressed companies were reported as insufficient data",
+      "commit": "2f890cb",
+      "tag": "change/C014",
+      "files": [
+        "apps/api/services/analytics/signals.py"
+      ],
+      "reversible": "git",
+      "flag": null,
+      "risk": "Distressed companies would again show grey rather than red."
+    },
+    {
+      "id": "C015",
+      "title": "Test suite at 153 tests",
+      "commit": "2f890cb",
+      "tag": "change/C015",
+      "files": [
+        "tests/test_providers.py",
+        "tests/test_intrinsic_value.py",
+        "tests/test_technicals.py",
+        "tests/test_signals.py"
+      ],
+      "reversible": "git",
+      "flag": null,
+      "risk": "Removes all automated verification."
+    },
+    {
+      "id": "C016",
+      "title": "Change reversal system",
+      "commit": "0630093",
+      "tag": "change/C016",
+      "files": [
+        "CHANGES_REGISTRY.json",
+        "scripts/revert_change.py",
+        "apps/api/config.py"
+      ],
+      "reversible": "git",
+      "flag": null,
+      "risk": "Removes the ability to inspect and revert other changes."
+    },
+    {
+      "id": "C017",
+      "title": "Migration 003: storage for the real engines",
+      "commit": "0630093",
+      "tag": "change/C017",
+      "files": [
+        "supabase/migrations/003_real_engines.sql"
+      ],
+      "reversible": "git",
+      "flag": null,
+      "risk": "Additive only; a migrated database keeps its columns harmlessly."
+    },
+    {
+      "id": "C018",
+      "title": "Ingestion and computation pipeline",
+      "commit": "0630093",
+      "tag": "change/C018",
+      "files": [
+        "apps/api/services/ingest_service.py"
+      ],
+      "reversible": "both",
+      "flag": "INGEST_HISTORY_ENABLED",
+      "risk": "Nothing moves real data into the database; engines have nothing to read."
+    }
+  ]
+}
