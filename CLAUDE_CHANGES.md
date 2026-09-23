@@ -1062,3 +1062,90 @@ A reference beyond the allowance now renders as `▲ Intrinsic value ₹499.77 �
 The `(stock as any)` casts that the missing fields had forced are gone too — they were suppressing the very error that would have caught this.
 
 ---
+#### C041 — Live verification harness
+
+| | |
+|---|---|
+| **What** | `scripts/verify_live.py` — seven checks that prove StockLens is telling the truth, run against the live source. Exits non-zero, so it can gate a deploy. |
+| **Why** | This closes the gap created by the sandbox network block described at the top of this file. The parsing, the maths and the database plumbing were all proven here. The claim *"the prices on screen match the market"* can only be made from somewhere with an open route to the source. |
+| **Files** | `scripts/verify_live.py` *(added, 700 lines)* |
+| **Verified** | Run against the live database — see output below |
+| **Reversible** | `git` |
+
+```bash
+python scripts/verify_live.py                       # everything
+python scripts/verify_live.py --symbols RELIANCE,TCS
+python scripts/verify_live.py --check prices --tolerance 0.5
+python scripts/verify_live.py --json report.json    # for CI
+```
+
+| Check | What it proves |
+|---|---|
+| **prices** | Every stored price matches the live source, to tolerance |
+| **history** | Price history is ordered, positive, continuous; high bounds low; closes sit inside their own bar; no future dates; adjusted close present |
+| **fundamentals** | Filings are deep enough and internally consistent — no operating profit above revenue, no equity above total assets |
+| **valuation** | Recomputing from the stored filings reproduces the stored intrinsic value within 1% |
+| **signals** | Every trade plan is coherent — stop below entry, entry below max buy price, max buy below intrinsic value, targets ordered, no buy rating with risk/reward under 1 |
+| **provenance** | **No fabricated data anywhere**, including the placeholder ISIN that was the signature of the removed mock universe generator |
+| **freshness** | Nothing old is being served unflagged as current |
+
+**On the tolerance.** It is not a fudge. The stored price and the live fetch are taken seconds apart, and on a moving stock those are genuinely different numbers. What must never happen is a *structural* mismatch — a stale price served as live, a wrong ticker showing another company's price, a split adjustment applied twice. Those produce errors far larger than the tolerance, which is what it is calibrated to catch.
+
+**On the valuation check specifically.** The engine is deterministic by construction: the same filings must yield the same number. A mismatch means the figure on the customer's screen is no longer the figure the current engine would produce — because filings were revised, or a code change moved the answer without the pipeline being re-run. That drift is invisible without this check.
+
+---
+
+#### C042 — Fixed: the verification harness reported a pass having verified nothing
+
+| | |
+|---|---|
+| **What** | A check that compares zero items now fails explicitly. |
+| **Why** | **Found by running the harness in this sandbox.** With every live fetch blocked by the proxy, `failed` stayed at zero and the price check printed **PASS** — while having compared precisely nothing. For a script whose entire job is to be believed, that is the worst possible failure mode: it would have certified a deployment whose prices had never been checked. |
+| **Files** | `scripts/verify_live.py` |
+| **Reversible** | `git` |
+
+Before the fix:
+
+```
+  prices         PASS        0      0      2      0   tolerance 1.0%
+```
+
+After:
+
+```
+  prices         FAIL        0      1      2      0   nothing verified
+  x Compared 0 of 2 stocks against the live source — every live fetch failed,
+    so nothing was verified.
+  ! TESTCO: could not fetch live price (UpstreamUnavailable: ProxyError: 403 Forbidden)
+```
+
+Two related changes: warnings now print even on a passing check, so "nothing was compared" can never hide behind a green mark; and a check that passed without asserting anything is marked **WARN** rather than **PASS**.
+
+The harness immediately proved itself on the other checks too, catching this session's own test fixtures:
+
+```
+  history      FAIL   TESTCO: 843 sessions dated in the future
+  provenance   FAIL   financial_results: 30 rows with data_source = 'TEST'
+```
+
+Both are correct findings about fixture data, and both are exactly what the checks exist to catch in production.
+
+---
+
+#### C043 — Test suite at 169 tests
+
+| | |
+|---|---|
+| **What** | Full suite green. |
+| **Verified** | `169 passed` with a database · `153 passed, 16 skipped` without one |
+| **Reversible** | n/a |
+
+| Suite | Tests | Covers |
+|---|---|---|
+| `test_providers.py` | 28 | parsing, coercion, rate limiting, retry |
+| `test_intrinsic_value.py` | 58 | hand-computed DCF, cost of capital, refusals, confidence, reverse DCF, WACC convergence |
+| `test_technicals.py` | 31 | every indicator, window handling, beta alignment |
+| `test_signals.py` | 36 | direction, gating, trade-plan coherence, explanations |
+| `test_pipeline.py` | 16 | the database plumbing, against real PostgreSQL |
+
+---

@@ -528,6 +528,42 @@
       "reversible": "git",
       "flag": null,
       "risk": "11 type errors return; multi-currency formatting silently reverts to rupees."
+    },
+    {
+      "id": "C041",
+      "title": "Live verification harness",
+      "commit": "1e4b357",
+      "tag": "change/C041",
+      "files": [
+        "scripts/verify_live.py"
+      ],
+      "reversible": "git",
+      "flag": null,
+      "risk": "Removes the only end-to-end proof that stored prices match the market."
+    },
+    {
+      "id": "C042",
+      "title": "Fix: the verification harness reported a pass having verified nothing",
+      "commit": "1e4b357",
+      "tag": "change/C042",
+      "files": [
+        "scripts/verify_live.py"
+      ],
+      "reversible": "git",
+      "flag": null,
+      "risk": "The harness could certify a deployment whose prices were never checked. Do not revert."
+    },
+    {
+      "id": "C043",
+      "title": "Test suite at 169 tests",
+      "commit": "1e4b357",
+      "tag": "change/C043",
+      "files": [
+        "tests/"
+      ],
+      "reversible": "git",
+      "flag": null,
+      "risk": "Removes automated verification."
     }
   ]
 }
