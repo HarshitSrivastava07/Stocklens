@@ -25,15 +25,19 @@
       "commit": "",
       "tag": "",
       "files": [],
-      "reversible": "git",
+      "reversible": "manual",
       "flag": null,
-      "risk": "Nothing; branch ref only."
+      "risk": "Discards the entire branch and every change on it.",
+      "manual_steps": [
+        "git checkout main",
+        "git branch -D claude/github-stocklens-access-6k4je5"
+      ]
     },
     {
       "id": "C002",
       "title": "CLAUDE_CHANGES.md running changelog",
-      "commit": "",
-      "tag": "",
+      "commit": "2f890cb",
+      "tag": "change/C002",
       "files": [
         "CLAUDE_CHANGES.md"
       ],

@@ -85,7 +85,7 @@ def cmd_list(args) -> int:
     for change in changes:
         commit = (change.get("commit") or "")[:8] or "-"
         how = change.get("reversible", "git")
-        colour = GREEN if how in ("flag", "both") else ""
+        colour = GREEN if how in ("flag", "both") else (YELLOW if how == "manual" else "")
         print(f"  {change['id']:<6} {colour}{how:<6}{RESET} {commit:<9} {change['title']}")
 
     flagged = [c for c in changes if c.get("flag")]
@@ -128,6 +128,16 @@ def cmd_show(args) -> int:
 def cmd_revert(args) -> int:
     change = find_change(load_registry(), args.change_id)
     commit = change.get("commit")
+
+    if change.get("reversible") == "manual":
+        print(f"\n{YELLOW}{change['id']} has no commit of its own.{RESET}")
+        if change.get("risk"):
+            print(f"  {RED}{change['risk']}{RESET}")
+        print(f"\n  {BOLD}Undo it by hand:{RESET}")
+        for step in change.get("manual_steps", []):
+            print(f"    {step}")
+        print(f"\n  {DIM}Not run automatically — this one is destructive.{RESET}\n")
+        return 0
 
     if change.get("reversible") == "flag":
         print(
@@ -202,8 +212,13 @@ def cmd_verify(args) -> int:
         if commit:
             if git("cat-file", "-t", commit, check=False) != "commit":
                 problems.append(f"{cid}: commit {commit} not found in this repository")
-        elif change.get("reversible") != "flag":
-            problems.append(f"{cid}: no commit recorded and not flag-reversible")
+        elif change.get("reversible") not in ("flag", "manual"):
+            problems.append(
+                f"{cid}: no commit recorded, and not reversible by flag or manual steps"
+            )
+
+        if change.get("reversible") == "manual" and not change.get("manual_steps"):
+            problems.append(f"{cid}: marked manual but lists no steps")
 
         tag = change.get("tag")
         if tag and git("tag", "-l", tag, check=False) != tag:
