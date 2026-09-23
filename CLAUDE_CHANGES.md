@@ -1149,3 +1149,47 @@ Both are correct findings about fixture data, and both are exactly what the chec
 | `test_pipeline.py` | 16 | the database plumbing, against real PostgreSQL |
 
 ---
+#### C044 — README setup path rewritten
+
+| | |
+|---|---|
+| **What** | Status block and getting-started steps now describe how the product actually works. |
+| **Why** | The README told a new operator the valuation, signal and ML engines were *"not yet implemented"* and pointed them at deleted seeders. |
+| **Files** | `README.md` |
+| **Reversible** | `git` |
+
+The setup path is now: apply the schema → import the real universe → run the pipeline → **verify before trusting it**. That last step is the one that matters, and it was not there before because there was nothing to verify.
+
+---
+
+## Where this leaves the project
+
+### What is real now
+
+| Capability | State |
+|---|---|
+| Live prices | Real provider, rate-limited, retried, never fabricated |
+| Ten years of price history | Real, split-adjusted, stored separately from raw |
+| Ten years of filings | Real, 29 line-items, missing years left missing |
+| Intrinsic value | Every assumption measured from the company's own record |
+| Buy / sell timing | Gated decision plus a trade plan in actual prices |
+| Historical charts | 1M to MAX, resampled, with the valuation drawn on |
+| Per-stock research | Notes stamped with the price and value at the time |
+| Verification | Seven live checks, exit-coded for CI |
+
+### What still needs your input
+
+1. **Run `scripts/verify_live.py` on a machine with open internet.** This is the one claim that could not be made from the build sandbox, and it is the claim that matters most. Everything is in place for it; it needs a network the sandbox denied.
+
+2. **Set `ADMIN_API_TOKEN`** before deploying. Without it every administrative endpoint refuses all requests — deliberately, so an unset token cannot mean "open to the world".
+
+3. **Review the market assumptions.** Risk-free rate and equity risk premium are in the `market_assumptions` table, seeded with reasonable defaults per country. They are the one input the engine cannot derive from filings, and they should reflect your house view.
+
+4. **History depth varies by listing.** The engine asks for twelve years and uses what the source actually serves, scaling its own confidence to the real depth. For Indian listings where the free feed is thin, the existing Screener.in import path fills the gap.
+
+### Commercial caveats worth stating plainly
+
+- Publishing buy/sell signals to the public is a **regulated activity** in most jurisdictions — in India, SEBI's Research Analyst regulations. The engine is deliberately built so every number is auditable, which helps, but registration is a legal question rather than a technical one.
+- Yahoo Finance has **no SLA and no commercial licence** for redistribution. It is the right choice for building and for personal use; a paid feed with terms you can rely on is the right choice for a product you charge for. The provider layer is isolated behind one interface specifically so that swap is small.
+
+---

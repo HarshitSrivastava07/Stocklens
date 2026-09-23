@@ -564,6 +564,18 @@
       "reversible": "git",
       "flag": null,
       "risk": "Removes automated verification."
+    },
+    {
+      "id": "C044",
+      "title": "README setup path rewritten",
+      "commit": "b61c5f6",
+      "tag": "change/C044",
+      "files": [
+        "README.md"
+      ],
+      "reversible": "git",
+      "flag": null,
+      "risk": "README reverts to describing engines as unimplemented and pointing at deleted scripts."
     }
   ]
 }

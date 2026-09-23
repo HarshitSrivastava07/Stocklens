@@ -2,7 +2,23 @@
 
 Stock-analysis platform for Indian (NSE/BSE) and global equities — real-time price ingestion, fundamentals ETL, and a Postgres schema designed for ratio analysis, DCF valuation, ML risk/quality scoring, and RAG-grounded AI research summaries.
 
-> **Project status: early / partially built.** The real-time ingestion worker, the batch ETL & seeding scripts, and the database schema are implemented and runnable. The API server, web frontend, valuation engine, ML pipeline, signal engine, and AI/RAG layer are designed in the schema but **not yet implemented**. See [Implementation status](#implementation-status) before you plan work against this repo.
+> **Project status: the analytics stack is built and tested.** Live price
+> ingestion, ten years of price history and filings, the intrinsic value engine,
+> technical indicators, the buy/sell engine, the research API and the stock
+> detail page are implemented, tested and verified against a real PostgreSQL
+> database. **169 automated tests pass.**
+>
+> Every source of fabricated data has been removed — the dev seeders that wrote
+> `random.uniform` values into the valuation and signal tables, and the endpoint
+> that did the same over a GET request. If a number appears in this product it
+> came from a filing or from the market.
+>
+> `scripts/verify_live.py` proves it: seven checks against the live data source,
+> exiting non-zero so it can gate a deploy. **Run it before you trust a
+> deployment.**
+>
+> Full record of what changed and why, with every change individually
+> reversible: [`CLAUDE_CHANGES.md`](CLAUDE_CHANGES.md).
 
 ---
 
@@ -193,11 +209,42 @@ The worker loads `<repo root>/.env` explicitly; the scripts search upward from t
 ### 4. Populate the stock universe
 
 ```bash
-python scripts/import_nse_symbols.py       # NSE equity list → stocks
-python scripts/seed_sectors.py             # sector taxonomy + stocks.sector_id
-python scripts/seed_global_stocks.py       # ~1,750 global stocks with yahoo_ticker
-python scripts/run_pipeline.py --symbols RELIANCE,TCS,INFY   # fetch real data and compute
+python scripts/seed_universe.py            # import the real NSE equity list
+python scripts/seed_universe.py --dry-run  # fetch and report, write nothing
 ```
+
+If the exchange list cannot be reached, this **fails and writes nothing**. That
+is deliberate: an empty stock table is a problem you can see, a fabricated one
+is not.
+
+### 4b. Fetch real data and compute everything from it
+
+```bash
+# Whole universe: 10y of daily prices, filings, live quotes, then
+# technicals -> valuations -> signals, in dependency order.
+python scripts/run_pipeline.py
+
+# Or a few names while you are setting up:
+python scripts/run_pipeline.py --symbols RELIANCE,TCS,INFY
+
+# Individual stages:
+python scripts/run_pipeline.py --stage valuation
+python scripts/run_pipeline.py --quotes-only
+```
+
+Progress and per-symbol errors are recorded in the `ingest_runs` table, so a
+failed overnight run can be diagnosed without re-running it.
+
+### 4c. Verify the result before trusting it
+
+```bash
+python scripts/verify_live.py              # seven checks, exits non-zero on failure
+python scripts/verify_live.py --json report.json
+```
+
+Checks that stored prices match the live source, that price history is
+continuous, that every valuation reproduces from its own filings, that every
+trade plan is coherent, and that **no fabricated data is present anywhere**.
 
 ### 5. Run the worker
 
