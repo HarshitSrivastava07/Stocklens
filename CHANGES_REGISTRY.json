@@ -245,6 +245,67 @@
       "reversible": "both",
       "flag": "INGEST_HISTORY_ENABLED",
       "risk": "Nothing moves real data into the database; engines have nothing to read."
+    },
+    {
+      "id": "C019",
+      "title": "Verified against a real PostgreSQL database",
+      "files": [],
+      "reversible": "manual",
+      "manual_steps": [
+        "Nothing to revert; this was a verification step."
+      ],
+      "risk": "None.",
+      "flag": null,
+      "commit": "ca3e527",
+      "tag": "change/C019"
+    },
+    {
+      "id": "C020",
+      "title": "Fix: benchmark indices were valued as if they were companies",
+      "files": [
+        "apps/api/services/ingest_service.py"
+      ],
+      "reversible": "git",
+      "risk": "Indices would again receive intrinsic values and buy ratings.",
+      "flag": null,
+      "commit": "ca3e527",
+      "tag": "change/C020"
+    },
+    {
+      "id": "C021",
+      "title": "Fix: stop loss could be printed as 0.01",
+      "files": [
+        "apps/api/services/analytics/signals.py"
+      ],
+      "reversible": "git",
+      "risk": "Volatile names would again show a one-paisa stop loss.",
+      "flag": null,
+      "commit": "ca3e527",
+      "tag": "change/C021"
+    },
+    {
+      "id": "C022",
+      "title": "Fix: a STRONG_BUY carrying risk/reward of 0.79",
+      "files": [
+        "apps/api/services/analytics/signals.py"
+      ],
+      "reversible": "git",
+      "risk": "Buy ratings could again carry a risk/reward below 1.",
+      "flag": null,
+      "commit": "ca3e527",
+      "tag": "change/C022"
+    },
+    {
+      "id": "C023",
+      "title": "Pipeline integration test suite",
+      "files": [
+        "tests/test_pipeline.py"
+      ],
+      "reversible": "git",
+      "risk": "Removes verification of the database plumbing.",
+      "flag": null,
+      "commit": "ca3e527",
+      "tag": "change/C023"
     }
   ]
 }

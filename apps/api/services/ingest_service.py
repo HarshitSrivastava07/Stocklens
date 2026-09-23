@@ -112,13 +112,21 @@ async def _finish_run(pool: asyncpg.Pool, run_id: Any, report: FetchReport) -> N
 # Symbol universe
 # ─────────────────────────────────────────────────────────────
 async def load_universe(
-    pool: asyncpg.Pool, symbols: Sequence[str] | None = None
+    pool: asyncpg.Pool,
+    symbols: Sequence[str] | None = None,
+    *,
+    include_non_equity: bool = False,
 ) -> list[dict]:
     """
     Stocks this pipeline can work on: active, and linked to a provider ticker.
 
     A stock without a ``yahoo_ticker`` is skipped rather than guessed at — a
     wrong ticker silently populates one company's page with another's prices.
+
+    Indices and derivatives are excluded unless ``include_non_equity`` is set.
+    Price ingestion passes it so benchmarks get their history (beta needs it);
+    the valuation and signal stages do not, because there is no business to
+    value underneath an index.
     """
     query = """
         SELECT s.nse_symbol, s.yahoo_ticker, s.company_name, s.currency,
@@ -129,6 +137,14 @@ async def load_universe(
          WHERE s.is_active = TRUE
            AND s.yahoo_ticker IS NOT NULL
     """
+    if not include_non_equity:
+        # An index is not a company. It has no filings, no share count and no
+        # intrinsic value, and valuing one produces a confident-looking buy
+        # rating on something that cannot be bought. Indices are still ingested
+        # for price history, because beta is regressed against them — they are
+        # excluded only from the stages that assume a business underneath.
+        query += " AND COALESCE(s.instrument_type, 'EQ') NOT IN ('INDEX', 'FO')"
+
     params: list[Any] = []
     if symbols:
         query += " AND s.nse_symbol = ANY($1::text[])"
@@ -158,7 +174,9 @@ async def backfill_price_history(
     and is the only correct input to a return or beta calculation. Conflating
     them puts a fake 50% crash on the chart of every stock that has ever split.
     """
-    universe = await load_universe(pool, symbols)
+    # Benchmarks are included here specifically: beta is regressed against their
+    # price history, so they must be ingested even though they are never valued.
+    universe = await load_universe(pool, symbols, include_non_equity=True)
     report = FetchReport(requested=len(universe))
     run_id = await _start_run(pool, "price_history")
     semaphore = asyncio.Semaphore(concurrency)

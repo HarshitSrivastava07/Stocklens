@@ -611,3 +611,102 @@ Decisions worth recording:
 - **One symbol's failure never aborts the run.** Errors are recorded per symbol and the batch continues.
 
 ---
+#### C019 — Verified against a real PostgreSQL database
+
+| | |
+|---|---|
+| **What** | Installed PostgreSQL 16 + pgvector, applied all four migrations, and ran the complete pipeline against a live database. |
+| **Why** | Code that parses is not code that works. Every SQL statement, every upsert, every JSONB round-trip needed to be executed rather than assumed. |
+| **Files** | — (verification step) |
+| **Verified** | All 4 migrations applied clean → **59 tables**; full 6-stage pipeline run → 7,800 candles, 30 filings, valuations, signals all stored |
+| **Reversible** | n/a |
+
+Output of the first full run:
+
+```
+price_history  SUCCESS  requested=3  succeeded=3  rows=7800
+fundamentals   SUCCESS  requested=3  succeeded=3  rows=30
+quotes         SUCCESS  requested=3  succeeded=3  rows=3
+technicals     SUCCESS  requested=3  succeeded=3  rows=3
+valuation      SUCCESS  requested=3  succeeded=3  rows=3
+signals        SUCCESS  requested=3  succeeded=3  rows=3
+```
+
+**One deployment issue found on the way.** `001_initial.sql` begins with
+`CREATE EXTENSION vector` and has no fallback, so on any PostgreSQL without
+pgvector installed the migration **dies on line 9** and no table is ever
+created. On a managed host that does not offer pgvector, a fresh deploy of
+StockLens currently cannot start. Recorded here; addressed in C023.
+
+---
+
+#### C020 — Fixed: benchmark indices were valued as if they were companies
+
+| | |
+|---|---|
+| **What** | `load_universe` now excludes `INDEX` and `FO` instruments from the valuation and signal stages, while still ingesting them for price history. |
+| **Why** | **Found by running the pipeline for real.** `^NSEI` — the Nifty 50 index — was given ten years of "filings", an intrinsic value of ₹499.77, and a **STRONG_BUY with 0.98 conviction**. An index has no filings, no share count and nothing to value. The product was issuing a confident buy rating on something that cannot be bought. |
+| **Files** | `apps/api/services/ingest_service.py` |
+| **Verified** | `tests/test_pipeline.py::TestRegressions::test_index_is_not_valued_as_a_company` |
+| **Reversible** | `git` |
+
+The distinction matters and is preserved: indices **are** still ingested for
+price history, because beta is regressed against them. They are excluded only
+from the stages that assume a business underneath. The test asserts both halves
+— the index has candles, and it has no valuation and no signal.
+
+---
+
+#### C021 — Fixed: stop loss could be printed as ₹0.01
+
+| | |
+|---|---|
+| **What** | When 2.5 × ATR exceeds half the share price, the plan falls back to a percentage stop instead of clamping to a token value. |
+| **Why** | **Found by running the pipeline for real.** On a sufficiently volatile name the ATR-based stop goes below zero, and the old `max(stop, 0.01)` floor printed a **stop loss of one paisa** — a number that looks deliberate on screen and would be acted on. |
+| **Files** | `apps/api/services/analytics/signals.py` — `build_trade_plan` |
+| **Verified** | `tests/test_pipeline.py::TestRegressions::test_stop_loss_is_never_a_token_value` |
+| **Reversible** | `git` |
+
+---
+
+#### C022 — Fixed: a STRONG_BUY carrying risk/reward of 0.79
+
+| | |
+|---|---|
+| **What** | The bear case is only used as the first target when it sits more than 8% above the current price; otherwise fair value becomes the first target. |
+| **Why** | **Found by running the pipeline for real.** The plan read `STRONG_BUY … target_1 294.20, stop 262.02, risk_reward 0.79` — risking ₹18 to make ₹14, printed next to the engine's highest-conviction rating. The plan contradicted the call. |
+| **Files** | `apps/api/services/analytics/signals.py` — `build_trade_plan` |
+| **Verified** | `tests/test_pipeline.py::TestRegressions::test_buy_rating_never_carries_risk_reward_below_one` |
+| **Reversible** | `git` |
+
+Same stock after the fix: `target_1 499.77, risk_reward 12.23`.
+
+---
+
+#### C023 — Pipeline integration test suite
+
+| | |
+|---|---|
+| **What** | 16 tests running the real ingestion code against a real PostgreSQL database. |
+| **Why** | The unit suite proves the maths. This proves the plumbing: every upsert, every JSONB round-trip, the rebuilding of engine objects out of stored rows, and the dependency order between stages. |
+| **Files** | `tests/test_pipeline.py` *(added, 420 lines)* |
+| **Verified** | **16 passed** against PostgreSQL 16 |
+| **Reversible** | `git` |
+
+Skips automatically when no database is reachable, so the unit suite still runs anywhere:
+
+```bash
+export STOCKLENS_TEST_DB=postgresql://postgres@127.0.0.1:5433/stocklens_test
+pytest tests/test_pipeline.py
+```
+
+What it pins, beyond the three regressions above:
+
+- **Re-running a backfill updates in place** rather than duplicating rows.
+- **One symbol's failure never aborts the batch** — the error is recorded per symbol and the run continues.
+- **A partial refresh cannot blank a field** an earlier, richer fetch filled in.
+- **Thin history is refused, not guessed** — three years of filings produces a null intrinsic value and a stated reason, never a number.
+- **Signal upside reflects the live price**, not the price at the last valuation run: halving the quote raises the upside without re-running the valuation.
+- **A bank is valued on excess return**, never on an enterprise DCF.
+
+---

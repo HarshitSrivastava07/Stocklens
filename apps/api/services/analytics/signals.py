@@ -428,18 +428,41 @@ def build_trade_plan(
         plan.entry_high = min(anchor * (1 + band), plan.max_buy_price)
 
     # Stop: ATR-based where volatility is known, otherwise a percentage floor.
+    #
+    # On a very volatile name 2.5 x ATR can exceed the price itself, which would
+    # put the stop at or below zero. Clamping that to 0.01 prints a "stop loss"
+    # of one paisa on screen — a number that looks deliberate and is worse than
+    # useless. Where the ATR stop is not a sane fraction of the price, fall back
+    # to a percentage stop instead.
+    atr_stop = None
     if tech is not None and tech.atr_14:
-        plan.stop_loss = price - _STOP_ATR_MULTIPLE * tech.atr_14
+        atr_stop = price - _STOP_ATR_MULTIPLE * tech.atr_14
+
+    if atr_stop is not None and atr_stop > price * 0.50:
+        plan.stop_loss = atr_stop
     else:
+        # Either no ATR, or volatility so high the ATR stop is meaningless.
         plan.stop_loss = price * 0.85
+
     # Never stop out above the entry zone.
     if plan.entry_low and plan.stop_loss >= plan.entry_low:
         plan.stop_loss = plan.entry_low * 0.92
-    plan.stop_loss = max(plan.stop_loss, 0.01)
 
-    # Targets: the bear case first, then fair value.
-    plan.target_1 = valuation.iv_bear if valuation.iv_bear and valuation.iv_bear > price else iv
-    plan.target_2 = iv if plan.target_1 != iv else (valuation.iv_bull or iv)
+    # Targets: the bear case as a conservative first milestone, then fair value.
+    #
+    # The bear case is only a useful first target if it is far enough above the
+    # price to be worth the risk taken to reach it. When it sits within noise of
+    # the current price, using it produces a risk/reward below 1 next to a buy
+    # rating — the plan contradicting the call. In that case skip straight to
+    # fair value as the first target.
+    bear = valuation.iv_bear
+    if bear and bear > price * 1.08:
+        plan.target_1 = bear
+        plan.target_2 = iv
+    else:
+        plan.target_1 = iv
+        plan.target_2 = valuation.iv_bull or iv
+
     if plan.target_2 and plan.target_1 and plan.target_2 < plan.target_1:
         plan.target_1, plan.target_2 = plan.target_2, plan.target_1
 
