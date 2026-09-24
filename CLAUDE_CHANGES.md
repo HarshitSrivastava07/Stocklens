@@ -1215,3 +1215,133 @@ The setup path is now: apply the schema → import the real universe → run the
 - Yahoo Finance has **no SLA and no commercial licence** for redistribution. It is the right choice for building and for personal use; a paid feed with terms you can rely on is the right choice for a product you charge for. The provider layer is isolated behind one interface specifically so that swap is small.
 
 ---
+## Session 2 — 2026-09-24
+
+You asked me to run the project and check whether the numbers match. Running it
+found three more defects, two of them serious. All are fixed below.
+
+The live price comparison still cannot be made here: every market-data host is
+still blocked at the proxy (`403` on CONNECT, re-verified this session).
+Everything that does not require that one hop was run and is reported.
+
+---
+
+#### C045 — Fixed: low-beta stocks produced a broken, partial valuation
+
+| | |
+|---|---|
+| **What** | Terminal growth is now capped by whichever binds first — the risk-free rate, or the spread the discount rate can actually support. |
+| **Why** | **Found by running the pipeline and cross-checking the output.** A defensive, low-beta company silently produced a valuation with a bear case but **no base and no bull case**, an empty ten-year projection, and a published bear value sitting *above* the blended one — inverting the ordering the whole scenario panel is read through. |
+| **Files** | `apps/api/services/analytics/intrinsic_value.py` — `build_assumptions` |
+| **Verified** | `tests/test_intrinsic_value.py::TestLowCostOfCapital` — 7 tests |
+| **Reversible** | `git` |
+
+The chain, as observed:
+
+| Step | Value |
+|---|---|
+| Regressed beta | **−0.13** → clamped to the 0.30 floor |
+| Cost of equity | 0.070 + 0.30 × 0.058 = **8.74%** |
+| Terminal growth | capped at the risk-free rate = **7.00%** |
+| Spread | 8.74 − 7.00 = **1.74%**, against a 2% minimum |
+| Bear case | WACC +1.5pp → spread 3.24% → **computed** |
+| Base case | spread 1.74% → **terminal value undefined** |
+| Bull case | WACC −1.0pp → spread 0.74% → **undefined** |
+
+The rule "terminal growth ≤ risk-free rate" is correct in spirit and was the
+only cap applied. It is not sufficient: the Gordon formula also needs WACC to
+exceed terminal growth by a workable margin, and a low-beta company's cost of
+equity can land *beneath* the risk-free rate plus that margin.
+
+**In a 7% risk-free-rate market this is not an edge case — it is every
+defensive, low-beta name.** Utilities, FMCG staples, and any stock whose beta
+regresses low would all have hit it.
+
+After the fix, the same stock:
+
+```
+before   bear=641.39   base=None     bull=None     proj=0    band ordered: n/a
+after    bear=641.39   base=1481.61  bull=2183.90  proj=10   band ordered: yes
+```
+
+---
+
+#### C046 — Fixed: a partial scenario set was published as if complete
+
+| | |
+|---|---|
+| **What** | The scenario band is published only when all three cases compute. Otherwise the band falls back to model dispersion, the reason is stated as a warning, and the orphaned projection is dropped. Ordering is enforced. |
+| **Why** | Same investigation as C045. A lone surviving bear value was stored with base and bull null. The panel renders the band as an **ordered range**; one that is neither ordered nor a range misinforms rather than informs. The ten-year projection was also retained while belonging to a base case that did not exist. |
+| **Files** | `apps/api/services/analytics/intrinsic_value.py` — `compute_intrinsic_value` |
+| **Verified** | `test_a_partial_scenario_set_is_never_published` sweeps beta 0.3–2.5 across four risk-free rates and asserts the count of populated bands is always 0 or 3, never 1 or 2 |
+| **Reversible** | `git` |
+
+C045 removes the cause; C046 makes the symptom impossible even if another cause appears.
+
+---
+
+#### C047 — Fixed: the chart misreported how much history exists
+
+| | |
+|---|---|
+| **What** | `sessions_in_range` and `sessions_stored` are reported separately, and the chart labels each for what it is. |
+| **Why** | **Found by comparing the API against the database field by field.** The endpoint returned only the range-limited row count, under a name the chart rendered as *"N sessions stored"*. A stock with 2,600 stored sessions claimed **2,520** on a 10-year view. |
+| **Files** | `apps/api/routers/research.py`, `apps/web/components/StockChart.tsx`, `apps/web/app/stocks/[symbol]/page.tsx` |
+| **Verified** | Every range re-checked; `sessions_available` retained so an existing client does not break |
+| **Reversible** | `git` |
+
+```
+1M   in_range=22     stored=2600    5Y   in_range=1260  stored=2600
+1Y   in_range=252    stored=2600   10Y   in_range=2520  stored=2600
+                                   MAX   in_range=2600  stored=2600
+```
+
+Cosmetic in isolation. Not cosmetic in a product whose entire claim is that its numbers mean what they say.
+
+---
+
+#### C048 — Independent cross-check of the valuation
+
+| | |
+|---|---|
+| **What** | The DCF was recomputed from the raw stored filings using arithmetic written separately, **deliberately not importing the valuation engine**, and compared against what the engine stored. |
+| **Why** | The engine agreeing with itself proves nothing. This proves the stored number is reproducible from the data behind it by someone who did not use its code. |
+| **Reversible** | n/a |
+
+```
+A. ASSUMPTIONS vs THE FILINGS
+   Revenue CAGR (10y)       mine=0.120000  engine=0.120000  drift=0.000%  MATCH
+   Operating margin median  mine=0.180000  engine=0.180000  drift=0.000%  MATCH
+   Effective tax median     mine=0.250000  engine=0.250000  drift=0.000%  MATCH
+   Sales-to-capital         mine=1.500000  engine=1.500000  drift=0.000%  MATCH
+   Cost of debt             mine=0.080000  engine=0.080000  drift=0.000%  MATCH
+
+B. PROJECTION
+   worst drift across all 10 years: 0.000331%  MATCH
+
+C. VALUE PER SHARE
+   mine=1,481.6019   engine=1,481.6100   drift=0.00055%   MATCH
+   terminal share    mine=0.844166  engine=0.844200       MATCH
+```
+
+The residual drift is the two-decimal rounding applied on storage.
+
+---
+
+#### C049 — API and database reconciled field by field
+
+| | |
+|---|---|
+| **What** | 62 field comparisons across two companies: price, change, volume, all four intrinsic values, WACC, cost of equity, beta, history depth, terminal share, confidence, the full trade plan, all five scores, action, chart counts and filing counts. |
+| **Verified** | **All match.** The one discrepancy found became C047. |
+| **Reversible** | n/a |
+
+---
+
+#### C050 — Test suite at 177 tests
+
+| | |
+|---|---|
+| **Verified** | `177 passed` with a database. Frontend: **0 type errors**, production build clean, all 15 routes. |
+
+---

@@ -215,7 +215,8 @@ function OverviewTab({
         entryHigh={signal?.available ? signal.plan?.entry_high : null}
         loading={chartLoading}
         resampled={chart?.resampled}
-        sessionsAvailable={chart?.sessions_available}
+        sessionsInRange={chart?.sessions_in_range ?? chart?.sessions_available}
+        sessionsStored={chart?.sessions_stored}
       />
 
       {/* ── The verdict ─────────────────────────────────── */}

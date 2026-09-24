@@ -425,3 +425,32 @@ class TestRegressions:
         )
         if row and row["risk_reward"] is not None:
             assert float(row["risk_reward"]) >= 1.0
+
+    async def test_chart_counts_do_not_misreport_what_is_stored(self, clean_db):
+        """
+        The chart endpoint reported only the range-limited row count, under a
+        name the UI rendered as "N sessions stored". A stock with 2,600 stored
+        sessions therefore claimed 2,520 on a 10-year view.
+
+        Cosmetic in isolation; not cosmetic in a product whose entire claim is
+        that its numbers mean what they say.
+        """
+        await seed_stock(clean_db, "ACME")
+        provider = StubProvider(candles={"ACME.NS": build_candles(days=1400)})
+        await ing.backfill_price_history(clean_db, provider)
+
+        stored = await clean_db.fetchval(
+            "SELECT count(*) FROM price_candles_daily WHERE nse_symbol = 'ACME'"
+        )
+        assert stored == 1400
+
+        # A range shorter than the history returns fewer rows, but must still
+        # report the true total separately.
+        rows = await clean_db.fetch(
+            """SELECT * FROM (
+                 SELECT date FROM price_candles_daily
+                  WHERE nse_symbol = 'ACME' ORDER BY date DESC LIMIT 252
+               ) recent ORDER BY date ASC"""
+        )
+        assert len(rows) == 252
+        assert len(rows) < stored

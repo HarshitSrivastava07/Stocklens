@@ -157,6 +157,20 @@ async def get_chart(
 
     rows = (await db.execute(text(query), params)).mappings().all()
 
+    # How many sessions exist in total, as distinct from how many this range
+    # asked for. The endpoint previously returned only the latter under the name
+    # "sessions_available", which the chart rendered as "N sessions stored" — so
+    # a stock with 2,600 stored sessions reported 2,520 on a 10Y view. Small,
+    # but this product's whole claim is that its numbers mean what they say.
+    total_stored = (
+        await db.execute(
+            text(
+                "SELECT count(*) AS n FROM price_candles_daily WHERE nse_symbol = :symbol"
+            ),
+            {"symbol": symbol},
+        )
+    ).scalar_one()
+
     if not rows:
         return {
             "symbol": symbol,
@@ -205,6 +219,9 @@ async def get_chart(
         "adjusted": adjusted,
         "candles": series,
         "count": len(series),
+        "sessions_in_range": len(rows),
+        "sessions_stored": total_stored,
+        # Kept so an existing client does not break; prefer the two above.
         "sessions_available": len(rows),
         "resampled": resampled,
         "first_date": rows[0]["date"].isoformat(),

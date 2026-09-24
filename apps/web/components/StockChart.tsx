@@ -44,7 +44,8 @@ interface Props {
   entryHigh?: number | null;
   loading?: boolean;
   resampled?: string | null;
-  sessionsAvailable?: number;
+  sessionsInRange?: number;
+  sessionsStored?: number;
 }
 
 const RANGES: ChartRange[] = ["1M", "3M", "6M", "YTD", "1Y", "3Y", "5Y", "10Y", "MAX"];
@@ -96,7 +97,8 @@ export default function StockChart({
   entryHigh,
   loading,
   resampled,
-  sessionsAvailable,
+  sessionsInRange,
+  sessionsStored,
 }: Props) {
   const svgRef = useRef<SVGSVGElement>(null);
   const [hover, setHover] = useState<number | null>(null);
@@ -243,10 +245,13 @@ export default function StockChart({
               {up ? "+" : ""}
               {model.changePct.toFixed(2)}% over {range}
             </span>
-            {sessionsAvailable != null && (
+            {sessionsInRange != null && (
               <span className="chart-meta">
                 {" · "}
-                {sessionsAvailable.toLocaleString()} sessions stored
+                {sessionsInRange.toLocaleString()} sessions
+                {sessionsStored != null && sessionsStored > sessionsInRange && (
+                  <> of {sessionsStored.toLocaleString()} stored</>
+                )}
               </span>
             )}
             {resampled && (

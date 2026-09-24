@@ -576,6 +576,82 @@
       "reversible": "git",
       "flag": null,
       "risk": "README reverts to describing engines as unimplemented and pointing at deleted scripts."
+    },
+    {
+      "id": "C045",
+      "title": "Fix: low-beta stocks produced a broken, partial valuation",
+      "commit": "fb1906d",
+      "tag": "change/C045",
+      "files": [
+        "apps/api/services/analytics/intrinsic_value.py"
+      ],
+      "reversible": "git",
+      "flag": null,
+      "risk": "Defensive low-beta stocks lose their base and bull cases and publish an inverted scenario band."
+    },
+    {
+      "id": "C046",
+      "title": "Fix: a partial scenario set was published as if complete",
+      "commit": "fb1906d",
+      "tag": "change/C046",
+      "files": [
+        "apps/api/services/analytics/intrinsic_value.py"
+      ],
+      "reversible": "git",
+      "flag": null,
+      "risk": "A lone scenario value can again be published as an ordered range."
+    },
+    {
+      "id": "C047",
+      "title": "Fix: the chart misreported how much history exists",
+      "commit": "fb1906d",
+      "tag": "change/C047",
+      "files": [
+        "apps/api/routers/research.py",
+        "apps/web/components/StockChart.tsx",
+        "apps/web/app/stocks/[symbol]/page.tsx"
+      ],
+      "reversible": "git",
+      "flag": null,
+      "risk": "The chart again claims fewer stored sessions than exist."
+    },
+    {
+      "id": "C048",
+      "title": "Independent cross-check of the valuation",
+      "commit": "fb1906d",
+      "tag": "change/C048",
+      "files": [],
+      "reversible": "manual",
+      "flag": null,
+      "risk": "None.",
+      "manual_steps": [
+        "Nothing to revert; this was a verification step."
+      ]
+    },
+    {
+      "id": "C049",
+      "title": "API and database reconciled field by field",
+      "commit": "fb1906d",
+      "tag": "change/C049",
+      "files": [],
+      "reversible": "manual",
+      "flag": null,
+      "risk": "None.",
+      "manual_steps": [
+        "Nothing to revert; this was a verification step."
+      ]
+    },
+    {
+      "id": "C050",
+      "title": "Test suite at 177 tests",
+      "commit": "fb1906d",
+      "tag": "change/C050",
+      "files": [
+        "tests/"
+      ],
+      "reversible": "git",
+      "flag": null,
+      "risk": "Removes automated verification."
     }
   ]
 }

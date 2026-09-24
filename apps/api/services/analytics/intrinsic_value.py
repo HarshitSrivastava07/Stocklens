@@ -848,11 +848,29 @@ def build_assumptions(
 
     growth_initial = clamp(blended_growth * (1 + shifts["growth"]), MIN_GROWTH, MAX_GROWTH)
 
+    wacc = clamp(coc.wacc + shifts["wacc"], MIN_WACC, MAX_WACC)
+
     # Nothing grows faster than the economy forever. Terminal growth is capped
-    # at the risk-free rate, which is the standard discipline: a company growing
+    # at the risk-free rate — the standard discipline, since a company growing
     # faster than that in perpetuity eventually becomes the whole economy.
+    #
+    # But that cap alone is not sufficient, and assuming it was is a real defect
+    # this engine shipped with. The Gordon formula needs WACC to exceed terminal
+    # growth by a workable margin; cap only at the risk-free rate and a
+    # low-beta company can end up with a cost of equity *beneath* it. Observed
+    # in practice: a stock whose beta regressed low took cost of equity to
+    # 8.74% against an Indian risk-free rate of 7.00%, leaving a 1.74% spread
+    # against the 2% minimum. The base and bull cases silently became
+    # incomputable while the bear case survived on its own WACC premium — so
+    # the published bear value sat *above* the blended one, inverting the
+    # scenario ordering the whole panel is read through.
+    #
+    # In a 7% risk-free-rate market this is not an edge case: it is every
+    # defensive, low-beta name. Terminal growth is therefore capped by whichever
+    # binds first — the risk-free rate, or the spread the model needs to exist.
+    terminal_ceiling = min(market.risk_free_rate, wacc - MIN_SPREAD_OVER_G)
     growth_terminal = clamp(
-        min(market.risk_free_rate, growth_initial), 0.0, market.risk_free_rate
+        min(terminal_ceiling, growth_initial), 0.0, max(0.0, terminal_ceiling)
     )
 
     margin = profile.operating_margin_median
@@ -867,8 +885,6 @@ def build_assumptions(
     tax = 0.25 if tax is None else clamp(tax, 0.05, 0.50)
 
     sales_to_capital = profile.sales_to_capital or 2.0
-
-    wacc = clamp(coc.wacc + shifts["wacc"], MIN_WACC, MAX_WACC)
 
     # Terminal ROIC: a mature business earns roughly its cost of capital as
     # competition arrives. Giving credit for a durable franchise, but capped.
@@ -1303,17 +1319,47 @@ def compute_intrinsic_value(
     else:
         blended = sum(m.value_per_share * m.weight for m in usable) / total_weight
 
-    # Scenario bands. Where the primary model produced its own bands, use them;
+    # Scenario bands. Where the primary model produced a *complete* set, use it;
     # otherwise derive a band from the dispersion of the models themselves.
-    if scenario_values:
-        result.iv_bear = scenario_values.get("BEAR")
-        result.iv_base = scenario_values.get("BASE")
-        result.iv_bull = scenario_values.get("BULL")
+    #
+    # "Complete" is the operative word. A partial set is worse than none: when
+    # only the bear case can be computed — which happens when the base and bull
+    # discount rates leave too thin a spread over terminal growth — storing that
+    # single value leaves the panel showing a bear figure with no base or bull
+    # beside it, and nothing stops that lone bear value sitting *above* the
+    # blended one. The scenario band is read as an ordered range, so publishing
+    # one that is neither ordered nor a range misinforms rather than informs.
+    complete = all(k in scenario_values for k in ("BEAR", "BASE", "BULL"))
+
+    if complete:
+        result.iv_bear = scenario_values["BEAR"]
+        result.iv_base = scenario_values["BASE"]
+        result.iv_bull = scenario_values["BULL"]
     else:
+        if scenario_values:
+            missing = [
+                k for k in ("BEAR", "BASE", "BULL") if k not in scenario_values
+            ]
+            result.warnings.append(
+                "Scenario range unavailable: the "
+                + ", ".join(m.lower() for m in missing)
+                + " case could not be computed; showing the spread across models instead"
+            )
+            # The projection belongs to a base case that does not exist.
+            result.projection = []
+            tv_share = None
+
         values = [m.value_per_share for m in usable]
         result.iv_bear = min(values)
         result.iv_base = median(values)
         result.iv_bull = max(values)
+
+    # Ordering is an invariant of the panel, not an accident of which model won.
+    band = sorted(
+        v for v in (result.iv_bear, result.iv_base, result.iv_bull) if v is not None
+    )
+    if len(band) == 3:
+        result.iv_bear, result.iv_base, result.iv_bull = band
 
     result.iv_blended = blended
     result.terminal_value_share = tv_share

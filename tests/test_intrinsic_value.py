@@ -15,6 +15,7 @@ from datetime import date
 import pytest
 
 from services.analytics.intrinsic_value import (
+    MIN_SPREAD_OVER_G,
     MIN_YEARS_REQUIRED,
     Assumptions,
     MarketContext,
@@ -590,3 +591,98 @@ class TestWaccConvergence:
             ).upside_pct
 
         assert upside(100.0) > upside(500.0) > upside(2000.0)
+
+
+# ─────────────────────────────────────────────────────────────
+# Low-discount-rate regime
+# ─────────────────────────────────────────────────────────────
+class TestLowCostOfCapital:
+    """
+    A cost of equity close to the risk-free rate is not an edge case.
+
+    In a 7% risk-free-rate market like India, any defensive low-beta name —
+    utilities, FMCG staples, or simply a stock whose beta regresses low — lands
+    here. Capping terminal growth at the risk-free rate alone then leaves the
+    Gordon formula without a workable spread, and the base and bull cases
+    silently become incomputable while the bear case survives on its own WACC
+    premium.
+
+    That produced a published bear value sitting *above* the blended one, with
+    no base or bull beside it: a scenario band that is neither ordered nor a
+    range, on a panel read as both.
+    """
+
+    def _value(self, beta: float, rf: float = 0.07):
+        return compute_intrinsic_value(
+            "DEFENSIVE",
+            build_history(years=10),
+            current_price=300.0,
+            market=MarketContext(risk_free_rate=rf, equity_risk_premium=0.058),
+            sector="Utilities",
+            regressed_beta=beta,
+            beta_source="regressed",
+        )
+
+    def test_terminal_growth_never_starves_the_spread(self):
+        for beta in (0.3, 0.5, 0.8, 1.2, 2.0):
+            result = self._value(beta)
+            for name, assumptions in result.assumptions.items():
+                spread = assumptions.wacc - assumptions.growth_terminal
+                assert spread >= MIN_SPREAD_OVER_G - 1e-9, (
+                    f"beta {beta} scenario {name}: spread {spread:.5f} "
+                    f"below the {MIN_SPREAD_OVER_G} minimum"
+                )
+
+    def test_all_three_scenarios_compute_on_a_low_beta_stock(self):
+        # The exact regime that produced bear-only output.
+        result = self._value(0.3)
+        assert result.ok
+        assert result.iv_bear is not None
+        assert result.iv_base is not None
+        assert result.iv_bull is not None
+
+    def test_scenario_band_is_always_ordered(self):
+        for beta in (0.3, 0.6, 1.0, 1.6, 2.5):
+            result = self._value(beta)
+            if result.iv_blended is None:
+                continue
+            assert result.iv_bear <= result.iv_base <= result.iv_bull, (
+                f"beta {beta}: band {result.iv_bear}, {result.iv_base}, "
+                f"{result.iv_bull} is not ordered"
+            )
+
+    def test_terminal_growth_still_respects_the_risk_free_cap(self):
+        # The spread rule must not let terminal growth drift *above* the
+        # risk-free rate on a high-WACC stock.
+        result = self._value(2.5)
+        for assumptions in result.assumptions.values():
+            assert assumptions.growth_terminal <= 0.07 + 1e-9
+
+    def test_a_partial_scenario_set_is_never_published(self):
+        # Whatever the inputs, the three bands are all present or all derived
+        # from model dispersion — never a lone survivor.
+        for beta in (0.3, 0.4, 0.5, 0.9, 1.5, 2.5):
+            for rf in (0.02, 0.04, 0.07, 0.09):
+                result = self._value(beta, rf=rf)
+                present = [
+                    v for v in (result.iv_bear, result.iv_base, result.iv_bull)
+                    if v is not None
+                ]
+                assert len(present) in (0, 3), (
+                    f"beta {beta} rf {rf}: {len(present)} of 3 scenario values set"
+                )
+
+    def test_bear_never_exceeds_the_blended_value(self):
+        for beta in (0.3, 0.7, 1.1, 2.0):
+            result = self._value(beta)
+            if result.iv_blended and result.iv_bear:
+                assert result.iv_bear <= result.iv_bull
+
+    def test_projection_is_dropped_when_there_is_no_base_case(self):
+        # A ten-year projection belongs to a base case; keeping it when that
+        # case could not be computed attaches workings to a number that is not
+        # there.
+        for beta in (0.3, 0.5, 1.0):
+            result = self._value(beta)
+            if result.iv_base is None:
+                assert result.projection == []
