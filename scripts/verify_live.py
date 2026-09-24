@@ -480,31 +480,51 @@ async def check_provenance(pool) -> CheckResult:
     check finds them.
     """
     result = CheckResult("provenance")
-    suspect = ("MOCK", "SEED", "DEV_SEED", "MOCK_GENERATOR", "FAKE", "SAMPLE", "TEST")
 
-    for table, column in (
-        ("realtime_quotes", "data_source"),
-        ("price_candles_daily", "data_source"),
-        ("financial_results", "data_source"),
-        ("stocks", "data_source"),
-        ("intrinsic_values", "data_source"),
+    # An allowlist, not a denylist.
+    #
+    # This check originally named the fake sources it knew about — MOCK, SEED,
+    # DEV_SEED and so on. That structure is unsound and was caught being
+    # unsound: candles stamped "FIXTURE" passed cleanly, because nobody had
+    # thought to add that word. A denylist of every name someone might give
+    # fabricated data cannot be completed, and the one that slips through is
+    # precisely the one nobody anticipated.
+    #
+    # Inverting it means an unrecognised source is a failure by default. Adding
+    # a new genuine feed requires one line here, which is the correct place for
+    # that decision to be made explicitly.
+    trusted = {
+        "YAHOO",           # Yahoo Finance provider
+        "NSE_BHAVCOPY",    # NSE daily bhavcopy
+        "NSE_EQUITY_LIST", # NSE official equity list
+        "BSE_XML",         # BSE quarterly results
+        "SCREENER",        # Screener.in export
+        "UPSTOX",          # Upstox live feed
+    }
+
+    for table in (
+        "realtime_quotes",
+        "price_candles_daily",
+        "financial_results",
+        "stocks",
+        "intrinsic_values",
     ):
         try:
             rows = await pool.fetch(
-                f"""SELECT {column} AS src, count(*) AS n
+                f"""SELECT coalesce(data_source, '(null)') AS src, count(*) AS n
                       FROM {table}
-                     WHERE upper(coalesce({column}, '')) = ANY($1::text[])
-                     GROUP BY {column}""",
-                list(suspect),
+                     GROUP BY data_source"""
             )
         except asyncpg.PostgresError:
             result.skipped += 1
             continue
 
-        if rows:
-            for row in rows:
+        untrusted = [r for r in rows if r["src"].upper() not in trusted]
+        if untrusted:
+            for row in untrusted:
                 result.fail(
-                    f"{table}: {row['n']} rows with data_source = '{row['src']}'"
+                    f"{table}: {row['n']} rows from an untrusted source "
+                    f"'{row['src']}' (trusted: {', '.join(sorted(trusted))})"
                 )
         else:
             result.passed += 1

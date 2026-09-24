@@ -652,6 +652,57 @@
       "reversible": "git",
       "flag": null,
       "risk": "Removes automated verification."
+    },
+    {
+      "id": "C051",
+      "title": "Fix: stored candles claimed a source they did not have",
+      "commit": "fdfdb46",
+      "tag": "change/C051",
+      "files": [
+        "apps/api/services/providers/base.py",
+        "apps/api/services/providers/yahoo.py",
+        "apps/api/services/ingest_service.py"
+      ],
+      "reversible": "git",
+      "flag": null,
+      "risk": "Candles are again labelled YAHOO regardless of origin; provenance becomes unverifiable."
+    },
+    {
+      "id": "C052",
+      "title": "Provenance check inverted from a denylist to an allowlist",
+      "commit": "fdfdb46",
+      "tag": "change/C052",
+      "files": [
+        "scripts/verify_live.py"
+      ],
+      "reversible": "git",
+      "flag": null,
+      "risk": "Fabricated data under an unanticipated source name passes the check."
+    },
+    {
+      "id": "C053",
+      "title": "Removed a dead constant that documented behaviour that never happened",
+      "commit": "fdfdb46",
+      "tag": "change/C053",
+      "files": [
+        "apps/api/services/analytics/intrinsic_value.py"
+      ],
+      "reversible": "git",
+      "flag": null,
+      "risk": "Restores a misleading no-op constant."
+    },
+    {
+      "id": "C054",
+      "title": "Data-source audit",
+      "commit": "fdfdb46",
+      "tag": "change/C054",
+      "files": [],
+      "reversible": "manual",
+      "flag": null,
+      "risk": "None.",
+      "manual_steps": [
+        "Nothing to revert; this was an audit."
+      ]
     }
   ]
 }

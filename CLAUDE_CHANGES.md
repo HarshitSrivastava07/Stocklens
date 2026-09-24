@@ -1345,3 +1345,64 @@ The residual drift is the two-decimal rounding applied on storage.
 | **Verified** | `177 passed` with a database. Frontend: **0 type errors**, production build clean, all 15 routes. |
 
 ---
+#### C051 — Fixed: stored candles claimed a source they did not have
+
+| | |
+|---|---|
+| **What** | `Candle` now carries a `source`; the provider stamps it; the ingest layer records what it was given. |
+| **Why** | **Found by auditing where the data in the database actually came from.** `store_candles` wrote the literal string `"YAHOO"` on every bar regardless of which provider supplied it. Fixture data therefore sat in the database labelled as market data — the exact failure this codebase exists to prevent, and one the provenance check could not see, because the label looked legitimate. |
+| **Files** | `apps/api/services/providers/base.py`, `apps/api/services/providers/yahoo.py`, `apps/api/services/ingest_service.py` |
+| **Verified** | 2 regression tests; re-ran the pipeline and confirmed fixture bars now store as `FIXTURE` |
+| **Reversible** | `git` |
+
+`Quote` and `FinancialPeriod` both carried a source. `Candle` did not, so the ingest layer had nothing to record and asserted a provider name instead. A bar with no stated source is now stored as `UNKNOWN` rather than attributed to anyone.
+
+The Redis dashboard payload carried the same hardcoded `"source": "YAHOO"` and is fixed with it.
+
+---
+
+#### C052 — Provenance check inverted from a denylist to an allowlist
+
+| | |
+|---|---|
+| **What** | Any data source not on an explicit trusted list now fails the check. |
+| **Why** | The check named the fake sources it knew about — `MOCK`, `SEED`, `DEV_SEED`, `TEST` — and was **caught missing `FIXTURE`**, because nobody had thought to add that word. A denylist of every name someone might give fabricated data cannot be completed, and the one that slips through is precisely the one nobody anticipated. |
+| **Files** | `scripts/verify_live.py` — `check_provenance` |
+| **Reversible** | `git` |
+
+Trusted: `YAHOO`, `NSE_BHAVCOPY`, `NSE_EQUITY_LIST`, `BSE_XML`, `SCREENER`, `UPSTOX`. Adding a new genuine feed takes one line — which is the correct place for that decision to be made explicitly.
+
+Before (blind to two of three): `financial_results: 20 rows with data_source = 'TEST'`
+
+After (catches all three):
+```
+realtime_quotes:     2 rows from an untrusted source 'FIXTURE'
+price_candles_daily: 7800 rows from an untrusted source 'FIXTURE'
+financial_results:   20 rows from an untrusted source 'TEST'
+```
+
+---
+
+#### C053 — Removed a dead constant that documented behaviour that never happened
+
+| | |
+|---|---|
+| **What** | `_BLEND_WEIGHTS = {"BEAR": 0.25, "BASE": 0.50, "BULL": 0.25}` deleted. |
+| **Why** | Defined, commented as the scenario blend, and **never referenced**. The blended value is a weighted average across *models*, not scenarios. Anyone tuning that constant would have changed nothing while believing they had reweighted the valuation. |
+| **Files** | `apps/api/services/analytics/intrinsic_value.py` |
+| **Reversible** | `git` |
+
+Replaced with a note explaining what actually governs the blend, rather than left as a decoy.
+
+---
+
+#### C054 — Data-source audit
+
+| | |
+|---|---|
+| **What** | Traced every user-visible number to its origin. |
+| **Reversible** | n/a |
+
+The audit and its conclusions are in the chat record for session 2; C051–C053 are what it found.
+
+---

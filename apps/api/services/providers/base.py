@@ -88,7 +88,16 @@ class Quote:
 
 @dataclass(frozen=True)
 class Candle:
-    """One OHLCV bar. ``adj_close`` is split- and dividend-adjusted."""
+    """
+    One OHLCV bar. ``adj_close`` is split- and dividend-adjusted.
+
+    ``source`` exists because it was missing, and its absence produced exactly
+    the failure this whole codebase is meant to prevent: the ingest layer
+    stamped every stored bar with the literal string ``"YAHOO"`` regardless of
+    which provider supplied it, so fixture data sat in the database labelled as
+    though it came from the market. ``Quote`` and ``FinancialPeriod`` both
+    carried a source; this did not.
+    """
 
     date: date
     open: float | None
@@ -97,6 +106,7 @@ class Candle:
     close: float
     adj_close: float | None
     volume: int | None
+    source: str = ""
 
 
 @dataclass

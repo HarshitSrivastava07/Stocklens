@@ -454,3 +454,49 @@ class TestRegressions:
         )
         assert len(rows) == 252
         assert len(rows) < stored
+
+    async def test_candles_record_the_source_they_came_from(self, clean_db):
+        """
+        Stored bars must say where they actually came from.
+
+        The ingest layer used to stamp the literal string "YAHOO" on every bar
+        regardless of provider, so fixture data sat in the database labelled as
+        market data — and verify_live.py's provenance check was blind to it,
+        because the label looked legitimate.
+        """
+        from services.providers.base import Candle
+
+        await seed_stock(clean_db, "ACME")
+        bars = [
+            Candle(date=d.date, open=d.open, high=d.high, low=d.low,
+                   close=d.close, adj_close=d.adj_close, volume=d.volume,
+                   source="FIXTURE")
+            for d in build_candles(days=30)
+        ]
+        await ing.backfill_price_history(
+            clean_db, StubProvider(candles={"ACME.NS": bars})
+        )
+
+        sources = [
+            r["data_source"]
+            for r in await clean_db.fetch(
+                "SELECT DISTINCT data_source FROM price_candles_daily "
+                "WHERE nse_symbol = 'ACME'"
+            )
+        ]
+        assert sources == ["FIXTURE"], f"expected FIXTURE, stored {sources}"
+
+    async def test_a_source_less_candle_is_marked_unknown_not_yahoo(self, clean_db):
+        """A bar with no stated source must never be attributed to a provider."""
+        await seed_stock(clean_db, "ACME")
+        await ing.backfill_price_history(
+            clean_db, StubProvider(candles={"ACME.NS": build_candles(days=20)})
+        )
+        sources = [
+            r["data_source"]
+            for r in await clean_db.fetch(
+                "SELECT DISTINCT data_source FROM price_candles_daily "
+                "WHERE nse_symbol = 'ACME'"
+            )
+        ]
+        assert sources == ["UNKNOWN"]

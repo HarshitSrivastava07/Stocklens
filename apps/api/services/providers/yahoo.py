@@ -423,6 +423,7 @@ class YahooProvider:
                     close=close,
                     adj_close=at(adj, i) if adj else close,
                     volume=to_int(volumes[i]) if i < len(volumes) else None,
+                    source=SOURCE,
                 )
             )
 

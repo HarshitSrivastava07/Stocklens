@@ -211,6 +211,11 @@ async def store_candles(
     """Upsert candles. Re-running a backfill corrects prior rows in place."""
     if not candles:
         return 0
+    # Record the source the candle actually carries. This used to be the literal
+    # "YAHOO" for every bar, which meant the provenance column asserted
+    # something the code had no way of knowing — and the provenance check in
+    # verify_live.py, which looks for exactly this kind of problem, was blind to
+    # it because the label looked legitimate.
     rows = [
         (
             symbol,
@@ -221,7 +226,7 @@ async def store_candles(
             c.close,
             c.adj_close,
             c.volume,
-            "YAHOO",
+            c.source or "UNKNOWN",
         )
         for c in candles
     ]
@@ -520,7 +525,11 @@ async def _publish_quotes(redis_client, quotes) -> None:
             json.dumps(
                 {
                     "type": "batch",
-                    "source": "YAHOO",
+                    # Same reasoning as the candle provenance above: report the
+                    # source the quotes carry, not a hardcoded guess.
+                    "source": (
+                        quotes[0].source if quotes and quotes[0].source else "UNKNOWN"
+                    ),
                     "updates": payloads,
                     "ts": datetime.now(timezone.utc).isoformat(),
                 }

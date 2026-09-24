@@ -823,9 +823,12 @@ _SCENARIO_SHIFTS = {
     "BULL": {"growth": +0.35, "margin": +0.12, "wacc": -0.010},
 }
 
-# Blend weights. Bear is weighted equally with bull despite being the less
-# pleasant case, and base carries half — a deliberately unexciting average.
-_BLEND_WEIGHTS = {"BEAR": 0.25, "BASE": 0.50, "BULL": 0.25}
+# NOTE: a `_BLEND_WEIGHTS = {"BEAR": 0.25, "BASE": 0.50, "BULL": 0.25}` constant
+# used to sit here, documented as the scenario blend. Nothing referenced it. The
+# blended value is a weighted average across *models* (see `ModelValue.weight`),
+# not across scenarios, so anyone tuning that constant would have changed
+# nothing while believing they had reweighted the valuation. Removed rather than
+# left as a decoy.
 
 
 def build_assumptions(
